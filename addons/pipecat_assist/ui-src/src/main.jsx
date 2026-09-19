@@ -1489,7 +1489,9 @@ function realtimeModelMatchesProvider(provider, model) {
   const value = String(model || "").trim();
   if (!value) return false;
   if (provider === "gemini") return value.includes("gemini");
-  if (provider === "openai") return value.includes("realtime") && !value.startsWith("models/");
+  if (provider === "openai") {
+    return (value.includes("realtime") || value.startsWith("gpt-live")) && !value.startsWith("models/");
+  }
   return true;
 }
 

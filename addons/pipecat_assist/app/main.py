@@ -75,6 +75,7 @@ from app.config import (
     DEFAULT_GOOGLE_IMAGEN_MODEL,
     DEFAULT_FAL_IMAGE_MODEL,
     DEFAULT_OPENAI_TEXT_MODEL,
+    DEFAULT_OPENAI_LIVE_MODEL,
     DEFAULT_OPENAI_REALTIME_MODEL,
     DEFAULT_OPENAI_REALTIME_VOICE,
     DEFAULT_OPENAI_STT_MODEL,
@@ -88,6 +89,8 @@ from app.config import (
     IntegrationConfig,
     OPENAI_REALTIME_VOICES,
     RuntimeConfig,
+    is_openai_live_model,
+    is_openai_speech_to_speech_model,
 )
 from app.audio_debug import (
     audio_debug_file_path,
@@ -170,6 +173,12 @@ HA_LIVE_RESULT_TIMEOUT_SECONDS = 75
 HA_LIVE_TURNS_BY_TRANSCRIPT: dict[tuple[str, str], "HALiveTurn"] = {}
 HA_LIVE_TURNS_BY_SPEECH: dict[tuple[str, str], "HALiveTurn"] = {}
 HA_ASSIST_WARMUP_TASK: asyncio.Task | None = None
+# ESPHome satellites hold their session open from boot, and OpenAI Live bills
+# every open session minute, so a satellite would cost the same as 24/7 use.
+ESPHOME_OPENAI_LIVE_UNSUPPORTED = (
+    "OpenAI Live (gpt-live) is not supported on ESPHome satellites. Select another pipeline."
+)
+ESPHOME_OPENAI_LIVE_WARNED: set[tuple[str, str]] = set()
 ESPHOME_PROVISIONER = ESPHomeProvisioner(
     STORE.load,
     supervisor_url=SUPERVISOR_URL,
@@ -859,6 +868,31 @@ async def api_esphome_satellite(websocket: WebSocket):
         or str(websocket.client.host if websocket.client else "")
         or f"esphome-{uuid.uuid4().hex[:12]}"
     )
+    if _flow_uses_openai_live(config, flow):
+        # The device retries with backoff, so warn once per satellite and flow.
+        if (client_id, flow.id) not in ESPHOME_OPENAI_LIVE_WARNED:
+            ESPHOME_OPENAI_LIVE_WARNED.add((client_id, flow.id))
+            logger.warning(
+                "ESPHome satellite {} rejected for flow {}: {}",
+                client_id,
+                flow.id,
+                ESPHOME_OPENAI_LIVE_UNSUPPORTED,
+            )
+        protocol = _va_pipecat_protocol(config)
+        await websocket.accept()
+        with suppress(Exception):
+            await websocket.send_text(protocol.hello())
+            await websocket.send_text(
+                protocol.error_message(
+                    "unsupported_pipeline",
+                    ESPHOME_OPENAI_LIVE_UNSUPPORTED,
+                    recoverable=False,
+                )
+            )
+        with suppress(Exception):
+            await websocket.close(code=4400, reason="OpenAI Live is not supported on ESPHome satellites")
+        return
+
     session_id = str(uuid.uuid4())
     await websocket.accept()
     await websocket.send_text(_va_pipecat_protocol(config).hello())
@@ -919,7 +953,11 @@ def _static_models_for(integration: IntegrationConfig, capability: str) -> list[
     values: list[str] = []
     if integration.kind == "openai":
         if capability == "realtime":
-            values = [integration.default_realtime_model or DEFAULT_OPENAI_REALTIME_MODEL]
+            values = [
+                integration.default_realtime_model or DEFAULT_OPENAI_REALTIME_MODEL,
+                DEFAULT_OPENAI_REALTIME_MODEL,
+                DEFAULT_OPENAI_LIVE_MODEL,
+            ]
         else:
             values = []
     elif integration.kind == "openai_cloud":
@@ -971,7 +1009,7 @@ def _static_models_for(integration: IntegrationConfig, capability: str) -> list[
 
 def _filter_openai_model(model_id: str, capability: str) -> bool:
     if capability == "realtime":
-        return "realtime" in model_id
+        return "realtime" in model_id or is_openai_live_model(model_id)
     if capability == "tts":
         return "tts" in model_id
     if capability == "stt":
@@ -4261,6 +4299,18 @@ def _provider_names_for_kinds(config: RuntimeConfig, kinds: set[str]) -> str:
     return ", ".join(names or sorted(kinds))
 
 
+def _flow_uses_openai_live(config: RuntimeConfig, flow: FlowConfig) -> bool:
+    """Return whether a flow runs on the per-minute billed OpenAI Live API."""
+
+    integration = config.model_integration(flow)
+    provider_kind = integration.kind if integration else flow.provider_id
+    return (
+        provider_kind == "openai"
+        and _runtime_mode(flow, provider_kind) == "s2s"
+        and is_openai_live_model(_model_name(flow, integration, provider_kind))
+    )
+
+
 def _runtime_flow_errors(config: RuntimeConfig, flow: FlowConfig) -> list[str]:
     """Return pipeline errors that would prevent a WebRTC runtime from starting."""
 
@@ -4333,7 +4383,7 @@ def _realtime_model_matches_provider(provider_kind: str, model: str) -> bool:
     if provider_kind == "gemini":
         return "gemini" in model
     if provider_kind == "openai":
-        return "realtime" in model and not model.startswith("models/")
+        return is_openai_speech_to_speech_model(model)
     return True
 
 
@@ -4537,6 +4587,65 @@ def _openai_realtime_service(
     )
 
 
+def _openai_live_backend_model(config: RuntimeConfig, flow: FlowConfig) -> str:
+    """Return the OpenAI text model that gpt-live delegates tool use and reasoning to."""
+
+    openai_cloud = config.integration("openai-cloud")
+    for candidate in (
+        flow.text_model,
+        openai_cloud.default_model if openai_cloud else "",
+        config.text_model,
+    ):
+        model = (candidate or "").strip()
+        if (
+            model
+            and not model.startswith(("gemini", "models/", "claude-", "amazon."))
+            and not is_openai_speech_to_speech_model(model)
+        ):
+            return model
+    return DEFAULT_OPENAI_TEXT_MODEL
+
+
+def _openai_live_service(
+    *,
+    api_key: str,
+    model: str,
+    flow: FlowConfig,
+    integration: IntegrationConfig | None,
+    backend_model: str,
+):
+    """Build a full-duplex OpenAI Live service.
+
+    gpt-live handles turn taking and barge-in itself. Tool calls, including
+    Home Assistant MCP tools, run through Responses delegation: OpenAI hosts
+    the backend text model and Pipecat executes its function calls with the
+    handlers registered on this service.
+    """
+
+    from pipecat.services.openai.live.llm import OpenAILiveLLMService
+    from pipecat.services.openai.responses.llm import (
+        OpenAIResponsesLLMService,
+        OpenAIResponsesReasoningConfig,
+    )
+
+    instructions = _effective_instructions(flow)
+    backend_settings = OpenAIResponsesLLMService.Settings(
+        model=backend_model,
+        system_instruction=instructions,
+    )
+    if flow.reasoning_effort:
+        backend_settings.reasoning = OpenAIResponsesReasoningConfig(effort=flow.reasoning_effort)
+    return OpenAILiveLLMService(
+        api_key=api_key,
+        settings=OpenAILiveLLMService.Settings(
+            model=model,
+            system_instruction=instructions,
+            voice=_openai_voice(flow, integration),
+        ),
+        delegation=OpenAILiveLLMService.ResponsesDelegation(settings=backend_settings),
+    )
+
+
 def _aws_nova_sonic_service(
     *,
     integration: IntegrationConfig,
@@ -4595,6 +4704,10 @@ def _build_stt_service(
     if integration.kind == "speechmatics":
         from pipecat.services.speechmatics.stt import SpeechmaticsSTTService
 
+        # Agent STT replaced the legacy real-time operating points, which the
+        # HA Assist bridge still uses directly; let Pipecat pick its model.
+        if model in {"enhanced", "standard"}:
+            model = ""
         return SpeechmaticsSTTService(
             api_key=_integration_api_key(integration, "STT"),
             settings=SpeechmaticsSTTService.Settings(
@@ -4801,7 +4914,7 @@ def _flow_enabled(flow: FlowConfig) -> bool:
 
 
 def _flow_node_configs(flow: FlowConfig, bridge: CombinedMCPBridge | None):
-    from pipecat_flows import FlowsFunctionSchema
+    from pipecat.flows import FlowsFunctionSchema
 
     nodes = flow.conversation_flow.get("nodes") or []
     by_id: dict[str, dict[str, Any]] = {}
@@ -4962,6 +5075,7 @@ async def run_bot(
         if provider_kind in {"gemini", "openai"} and not api_key:
             raise RuntimeError(f"The selected {provider_kind} realtime provider is missing an API key")
 
+        openai_live = False
         if provider_kind == "aws_nova_sonic":
             integration = _require_integration(
                 integration,
@@ -4992,13 +5106,27 @@ async def run_bot(
             )
         else:
             realtime_model = _model_name(flow, integration, provider_kind)
-            llm = _openai_realtime_service(
-                api_key=api_key,
-                model=realtime_model,
-                flow=flow,
-                integration=integration,
-                tools_schema=tools_schema,
-            )
+            openai_live = is_openai_live_model(realtime_model)
+            if openai_live and is_esphome_satellite:
+                raise RuntimeError(ESPHOME_OPENAI_LIVE_UNSUPPORTED)
+            if openai_live:
+                backend_model = _openai_live_backend_model(config, flow)
+                logger.info("OpenAI Live delegates tool use to {}", backend_model)
+                llm = _openai_live_service(
+                    api_key=api_key,
+                    model=realtime_model,
+                    flow=flow,
+                    integration=integration,
+                    backend_model=backend_model,
+                )
+            else:
+                llm = _openai_realtime_service(
+                    api_key=api_key,
+                    model=realtime_model,
+                    flow=flow,
+                    integration=integration,
+                    tools_schema=tools_schema,
+                )
         _register_local_tool_handlers(llm, local_tool_schemas)
 
         logger.info(
@@ -5040,10 +5168,12 @@ async def run_bot(
                     stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=0.2)]
                 ),
             )
+        # gpt-live closes user turns itself and must not defer user messages
+        # behind its tool calls, so let Pipecat pick the aggregator mode.
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
             user_params=user_params,
-            realtime_service_mode=True,
+            realtime_service_mode=None if openai_live else True,
         )
 
         if config.audio_debug_enabled:
@@ -5077,7 +5207,8 @@ async def run_bot(
             logger.info("Client connected to flow {}", flow.id)
             if _flow_enabled(flow):
                 logger.warning("Pipecat Flows are ignored for speech-to-speech runtime {}", provider_kind)
-            if is_esphome_satellite or flow.greeting.strip():
+            # A gpt-live session only starts on the first context frame.
+            if is_esphome_satellite or flow.greeting.strip() or openai_live:
                 await worker.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_client_disconnected")
@@ -5176,7 +5307,7 @@ async def run_bot(
         )
         flow_manager = None
         if initial_flow_node:
-            from pipecat_flows import FlowManager
+            from pipecat.flows import FlowManager
 
             flow_manager = FlowManager(
                 worker=worker,

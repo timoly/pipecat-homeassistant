@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.81
+
+- Upgrade Pipecat to 1.11 and use the bundled `pipecat.flows` package instead
+  of the frozen standalone `pipecat-ai-flows` release.
+- Add OpenAI Live (`gpt-live-1`) as a full-duplex speech-to-speech model for
+  the OpenAI Realtime integration. Home Assistant MCP tools and Web Search run
+  through Responses delegation to an OpenAI text model.
+- Reject OpenAI Live pipelines for ESPHome satellites, whose always-open
+  sessions would be billed around the clock.
+- Map the legacy Speechmatics `enhanced`/`standard` operating points to the
+  default Agent STT model in Pipecat pipelines.
+- Publish the add-on image from the `timoly/pipecat-homeassistant` fork.
+
 ## 0.1.80
 
 - Coalesce streaming user and assistant transcript tokens into cumulative

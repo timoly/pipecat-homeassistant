@@ -36,6 +36,7 @@ GEMINI_TTS_FALLBACK_MODELS = (
 )
 DEFAULT_OPENAI_TEXT_MODEL = "gpt-5.4-mini"
 DEFAULT_OPENAI_REALTIME_MODEL = "gpt-realtime-2"
+DEFAULT_OPENAI_LIVE_MODEL = "gpt-live-1"
 DEFAULT_OPENAI_REALTIME_VOICE = "marin"
 DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
@@ -126,6 +127,21 @@ def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def is_openai_live_model(model: str | None) -> bool:
+    """Return whether a model runs on the full-duplex OpenAI Live API."""
+
+    return (model or "").strip().startswith("gpt-live")
+
+
+def is_openai_speech_to_speech_model(model: str | None) -> bool:
+    """Return whether a model is an OpenAI Realtime or Live speech-to-speech model."""
+
+    model = (model or "").strip()
+    if not model or model.startswith("models/"):
+        return False
+    return "realtime" in model or is_openai_live_model(model)
 
 
 def _is_http_url(value: str | None) -> bool:
@@ -844,7 +860,7 @@ def _is_realtime_model_for_provider(provider_kind: str, model: str) -> bool:
     if provider_kind == "gemini":
         return "gemini" in model
     if provider_kind == "openai":
-        return "realtime" in model and not model.startswith("models/")
+        return is_openai_speech_to_speech_model(model)
     return True
 
 
