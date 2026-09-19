@@ -81,6 +81,17 @@ class OpenAILiveModelTests(unittest.TestCase):
             [item["id"] for item in main._static_models_for(config.integration("openai"), "realtime")],
         )
 
+    def test_integration_voice_wins_over_the_voice_saved_with_the_pipeline(self):
+        config = default_config_from_environment()
+        integration = config.integration("openai")
+        integration.default_voice = "ash"
+        # The UI clears step voices on save and has no pipeline voice field, so
+        # flow.voice keeps the integration voice from when the pipeline was made.
+        flow = _openai_live_flow(voice="marin")
+        flow.steps[-1].voice = ""
+
+        self.assertEqual(main._openai_voice(flow, integration), "ash")
+
     def test_config_store_keeps_live_model_after_reload(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
@@ -177,7 +188,7 @@ class OpenAILiveSessionTests(unittest.IsolatedAsyncioTestCase):
                 FunctionSchema(
                     name="HassTurnOn",
                     description="Turn on a device",
-                    properties={"name": {"type": "string"}},
+                    properties={"name": {"type": "string"}, "floor": {"type": "string"}},
                     required=["name"],
                 )
             ]
@@ -197,7 +208,10 @@ class OpenAILiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delegation["type"], "responses")
         self.assertEqual(delegation["responses"]["model"], "gpt-5.4-mini")
         self.assertEqual(delegation["responses"]["reasoning"], {"effort": "low"})
-        self.assertIn("HassTurnOn", str(delegation["responses"]["tools"]))
+        tool = next(item for item in delegation["responses"]["tools"] if item["name"] == "HassTurnOn")
+        self.assertEqual(tool["parameters"]["properties"]["name"]["type"], "string")
+        self.assertEqual(tool["parameters"]["properties"]["floor"]["type"], ["string", "null"])
+        self.assertIn(main.OPENAI_LIVE_TOOL_GUIDANCE, delegation["responses"]["instructions"])
         self.assertEqual(llm._opening_instruction, flow.greeting)
 
 

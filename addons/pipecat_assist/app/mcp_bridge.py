@@ -531,7 +531,23 @@ class CombinedMCPBridge:
         if not route:
             raise RuntimeError(f"Unknown MCP tool: {name}")
         bridge, original_name = route
-        return await bridge.call_tool(original_name, arguments)
+        return await bridge.call_tool(original_name, self._without_empty_optionals(name, arguments))
+
+    def _without_empty_optionals(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Drop optional arguments that a model filled with an empty placeholder.
+
+        Home Assistant treats every argument it receives as a filter or a
+        setting, so an empty name, color, or domain list makes the call fail.
+        """
+
+        tools = self._tools_schema.standard_tools if self._tools_schema else []
+        tool = next((item for item in tools if item.name == name), None)
+        required = set(tool.required or []) if tool else set()
+        return {
+            key: value
+            for key, value in arguments.items()
+            if key in required or value not in (None, "", [], {})
+        }
 
 
 async def check_mcp(

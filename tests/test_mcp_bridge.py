@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import sys
 import threading
@@ -37,6 +38,17 @@ class LocalMCPServer:
         def GetDateTime() -> str:
             """Return the current date and time."""
             return DATE_TIME
+
+        @server.tool()
+        def HassLightSet(
+            name: str | None = None,
+            area: str | None = None,
+            color: str | None = None,
+            brightness: int | None = None,
+        ) -> str:
+            """Echo the arguments Home Assistant would receive."""
+            received = {"name": name, "area": area, "color": color, "brightness": brightness}
+            return json.dumps({key: value for key, value in received.items() if value is not None})
 
         self.port = _free_port()
         self.server = uvicorn.Server(
@@ -100,10 +112,24 @@ class CombinedMCPBridgeTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(arguments={}, result_callback=result_callback)
         )
 
-        self.assertEqual([tool.name for tool in tools.standard_tools], ["homeassistant__GetDateTime"])
+        self.assertEqual(
+            sorted(tool.name for tool in tools.standard_tools),
+            ["homeassistant__GetDateTime", "homeassistant__HassLightSet"],
+        )
         self.assertEqual(results, [DATE_TIME])
         latest = list_mcp_call_history()["calls"][0]
         self.assertEqual((latest["tool"], latest["ok"]), ("GetDateTime", True))
+
+    async def test_empty_optional_arguments_do_not_reach_home_assistant(self):
+        await self.bridge.tools_schema(cache_enabled=False)
+
+        # What the OpenAI Live backend sent for "laita työhuoneen spotit päälle".
+        result = await self.bridge.call_tool(
+            "homeassistant__HassLightSet",
+            {"name": "Spotit", "area": "", "color": None, "brightness": 100},
+        )
+
+        self.assertEqual(json.loads(result), {"name": "Spotit", "brightness": 100})
 
     async def test_recording_client_records_pipecat_tool_calls(self):
         _, bridge = self.bridge.bridges[0]

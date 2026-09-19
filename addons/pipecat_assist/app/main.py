@@ -185,6 +185,12 @@ OPENAI_LIVE_RECOVERY_INSTRUCTION = (
     "The previous voice session ended before your last answer finished. Briefly tell "
     "the user that your answer was cut off and ask them to repeat their request."
 )
+OPENAI_LIVE_TOOL_GUIDANCE = (
+    "When you call Home Assistant tools, pass only the arguments the request needs. "
+    "Leave every other optional argument null instead of guessing a value: do not "
+    "add a floor, area, color, or temperature the user did not ask for, and use "
+    "device names exactly as GetLiveContext reports them."
+)
 # Sentence punctuation that the next caption piece has already followed with a space.
 OPENAI_LIVE_SENTENCE_END_RE = re.compile(r"[.!?…]+[\"')\]»”]*(?=\s)")
 OPENAI_LIVE_CAPTION_MAX_CHARS = 200
@@ -4434,10 +4440,12 @@ def _model_name(
 
 def _openai_voice(flow: FlowConfig, integration: IntegrationConfig | None) -> str:
     output_step = _output_step(flow)
+    # The integration's voice is the one the UI edits. flow.voice only records
+    # the voice the pipeline was created with, so it must not override it.
     for candidate in (
         output_step.voice if output_step else "",
-        flow.voice,
         integration.default_voice if integration else "",
+        flow.voice,
     ):
         if _realtime_voice_matches_provider("openai", candidate):
             return candidate
@@ -4451,10 +4459,12 @@ def _gemini_model(model: str) -> str:
 
 def _gemini_voice(flow: FlowConfig, integration: IntegrationConfig | None) -> str:
     output_step = _output_step(flow)
+    # The integration's voice is the one the UI edits. flow.voice only records
+    # the voice the pipeline was created with, so it must not override it.
     for candidate in (
         output_step.voice if output_step else "",
-        flow.voice,
         integration.default_voice if integration else "",
+        flow.voice,
     ):
         if _realtime_voice_matches_provider("gemini", candidate):
             return candidate
@@ -4596,6 +4606,29 @@ def _openai_realtime_service(
     )
 
 
+def _nullable_optional_parameters(tool: dict[str, Any]) -> dict[str, Any]:
+    """Let a model leave optional tool arguments null instead of inventing values.
+
+    The OpenAI Live backend fills in every tool argument, so without a null
+    option it sends empty strings, zeros, or guesses for the ones it does not
+    need. The MCP bridge drops the nulls before calling Home Assistant.
+    """
+
+    parameters = tool.get("parameters")
+    if tool.get("type") != "function" or not isinstance(parameters, dict):
+        return tool
+    required = set(parameters.get("required") or [])
+    properties = {}
+    for name, schema in (parameters.get("properties") or {}).items():
+        kind = schema.get("type") if isinstance(schema, dict) else None
+        if name not in required and isinstance(kind, str) and kind != "null":
+            schema = {**schema, "type": [kind, "null"]}
+            if isinstance(schema.get("enum"), list):
+                schema["enum"] = [*schema["enum"], None]
+        properties[name] = schema
+    return {**tool, "parameters": {**parameters, "properties": properties}}
+
+
 def _openai_live_backend_model(config: RuntimeConfig, flow: FlowConfig) -> str:
     """Return the OpenAI text model that gpt-live delegates tool use and reasoning to."""
 
@@ -4709,6 +4742,7 @@ def _openai_live_service(
 
         def _invocation_params(self):
             params = super()._invocation_params()
+            params["tools"] = [_nullable_optional_parameters(tool) for tool in params["tools"]]
             if self._starting_session and self._recovery_instruction:
                 instruction, self._recovery_instruction = self._recovery_instruction, None
                 history = [] if self._recovery_drops_history else params["input"]
@@ -4721,6 +4755,15 @@ def _openai_live_service(
                     ),
                 ]
             return params
+
+        async def _handle_evt_session_started(self, evt):
+            output = (evt.session.audio or {}).get("output") or {}
+            logger.info(
+                "OpenAI Live session voice: requested {}, using {}",
+                self._settings.voice,
+                output.get("voice") or "unreported",
+            )
+            await super()._handle_evt_session_started(evt)
 
         async def _handle_evt_error(self, evt):
             if evt.error.code == "content_filter":
@@ -4781,7 +4824,7 @@ def _openai_live_service(
     instructions = _effective_instructions(flow)
     backend_settings = OpenAIResponsesLLMService.Settings(
         model=backend_model,
-        system_instruction=instructions,
+        system_instruction=f"{instructions}\n\n{OPENAI_LIVE_TOOL_GUIDANCE}",
     )
     if flow.reasoning_effort:
         backend_settings.reasoning = OpenAIResponsesReasoningConfig(effort=flow.reasoning_effort)

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.84
+
+- Drop optional MCP tool arguments that a model filled with an empty value
+  before calling Home Assistant, which treats an empty name, color, or domain
+  list as a filter or setting and fails the call.
+- Let OpenAI Live's backend leave optional tool arguments null and tell it not
+  to guess floors, areas, colors, or temperatures the user did not ask for.
+- Use the voice set on the integration for OpenAI Realtime, OpenAI Live, and
+  Gemini Live pipelines. The UI has no pipeline voice field, so the voice saved
+  when a pipeline was created kept overriding later changes.
+- Log the voice OpenAI Live was asked for and the voice the session uses.
+
 ## 0.1.83
 
 - Start the replacement OpenAI Live session without the earlier turns after a
