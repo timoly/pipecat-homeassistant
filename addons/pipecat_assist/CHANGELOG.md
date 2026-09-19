@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.82
+
+- Fix Home Assistant MCP tool calls on Pipecat 1.11, whose MCP client no
+  longer exposes the session helper the bridge used.
+- Reopen an OpenAI Live session when the API closes it mid-call, for example
+  after a moderation stop, and let the assistant say its answer was cut off.
+- Pass OpenAI Live captions on a sentence at a time, so the UI and Lovelace
+  card no longer split or drop the word pieces gpt-live streams.
+
 ## 0.1.81
 
 - Upgrade Pipecat to 1.11 and use the bundled `pipecat.flows` package instead

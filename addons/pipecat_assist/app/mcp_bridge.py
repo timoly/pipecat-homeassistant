@@ -225,50 +225,23 @@ def _finish_history_item(
 class RecordingMCPClient(MCPClient):
     """Pipecat MCP client that records tool calls for the Runtime UI."""
 
-    async def _call_tool(self, session, function_name, arguments, result_callback):
+    async def _call_tool_text(self, function_name, arguments) -> str:
         history_item, started = _new_history_item(function_name, dict(arguments or {}))
-        logger.debug("Calling mcp tool '{}'", function_name)
-        results = None
-        error = ""
         try:
-            results = await session.call_tool(function_name, arguments=arguments)
+            response = await super()._call_tool_text(function_name, arguments)
         except Exception as err:
-            error = f"Error calling mcp tool {function_name}: {err}"
-            logger.error(error)
-
-        response = ""
-        if results:
-            if hasattr(results, "content") and results.content:
-                for index, content in enumerate(results.content):
-                    if hasattr(content, "text") and content.text:
-                        logger.debug("Tool response chunk {}: {}", index, content.text)
-                        response += content.text
-            else:
-                logger.error("Error getting content from {} results.", function_name)
-
-        if function_name in self._tools_output_filters:
-            try:
-                response = self._tools_output_filters[function_name](response)
-                logger.debug("Final response after filter: {}", response)
-            except Exception:
-                logger.error("Error applying output filter for {}", function_name)
-                response = ""
-
-        ok = bool(response and isinstance(response, str) and not error)
-        if ok:
-            logger.info("Tool '{}' completed successfully", function_name)
-            logger.debug("Final response: {}", response)
-        else:
-            response = "Sorry, could not call the mcp tool"
-
+            _finish_history_item(history_item, started, ok=False, error=str(err))
+            raise
+        # Pipecat returns tool failures to the model as text instead of raising.
+        ok = not response.startswith(("Error calling mcp tool", "Sorry, could not call the mcp tool"))
         _finish_history_item(
             history_item,
             started,
             ok=ok,
             result=response,
-            error=error,
+            error="" if ok else response,
         )
-        await result_callback(response)
+        return response
 
 
 def _tool_prefix(value: str) -> str:
@@ -404,7 +377,9 @@ class HomeAssistantMCPBridge:
             raise RuntimeError("MCP bridge is not started")
         history_item, started = _new_history_item(name, arguments)
         try:
-            session = self.client._ensure_connected()  # Pipecat exposes no public call_tool yet.
+            # Pipecat exposes no public call_tool yet; this is the session its
+            # own tool handlers use, reopened if a failed call dropped it.
+            session = await self.client._open_session(as_owner=False)
             result = await session.call_tool(name, arguments=arguments)
             chunks: list[str] = []
             for content in getattr(result, "content", []) or []:

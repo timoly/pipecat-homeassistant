@@ -179,6 +179,15 @@ ESPHOME_OPENAI_LIVE_UNSUPPORTED = (
     "OpenAI Live (gpt-live) is not supported on ESPHome satellites. Select another pipeline."
 )
 ESPHOME_OPENAI_LIVE_WARNED: set[tuple[str, str]] = set()
+OPENAI_LIVE_MAX_RECOVERIES = 3
+OPENAI_LIVE_RECOVERY_WINDOW_SECS = 120
+OPENAI_LIVE_RECOVERY_INSTRUCTION = (
+    "The previous voice session ended before your last answer finished. Briefly tell "
+    "the user that your answer was cut off and ask them to repeat their request."
+)
+# Sentence punctuation that the next caption piece has already followed with a space.
+OPENAI_LIVE_SENTENCE_END_RE = re.compile(r"[.!?…]+[\"')\]»”]*(?=\s)")
+OPENAI_LIVE_CAPTION_MAX_CHARS = 200
 ESPHOME_PROVISIONER = ESPHomeProvisioner(
     STORE.load,
     supervisor_url=SUPERVISOR_URL,
@@ -4622,11 +4631,101 @@ def _openai_live_service(
     handlers registered on this service.
     """
 
+    from pipecat.frames.frames import AggregationType, TTSStoppedFrame, TTSTextFrame
+    from pipecat.processors.frame_processor import FrameDirection
     from pipecat.services.openai.live.llm import OpenAILiveLLMService
     from pipecat.services.openai.responses.llm import (
         OpenAIResponsesLLMService,
         OpenAIResponsesReasoningConfig,
     )
+
+    class ResilientOpenAILiveLLMService(OpenAILiveLLMService):
+        """Start a new session when the Live API ends one mid-conversation.
+
+        The API closes a session on its own, for example after a moderation
+        stop. Pipecat then treats the dropped connection as permanent and the
+        call goes silent, so reopen a session seeded from the context instead.
+
+        Captions are also passed on a sentence at a time: gpt-live streams its
+        transcript in word pieces, which the UI and the Lovelace card would
+        otherwise merge as if each piece were a word.
+        """
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._closing_on_request = False
+            self._recovery_times: list[float] = []
+            self._caption = ""
+
+        async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
+            if direction == FrameDirection.DOWNSTREAM:
+                if isinstance(frame, TTSTextFrame):
+                    self._caption += frame.text
+                    await self._push_caption(final=False)
+                    return
+                if isinstance(frame, TTSStoppedFrame):
+                    await self._push_caption(final=True)
+            await super().push_frame(frame, direction)
+
+        async def _push_caption(self, *, final: bool):
+            text = self._caption
+            end = len(text) if final else 0
+            if not final:
+                sentence_ends = [match.end() for match in OPENAI_LIVE_SENTENCE_END_RE.finditer(text)]
+                if sentence_ends:
+                    end = sentence_ends[-1]
+                elif len(text) > OPENAI_LIVE_CAPTION_MAX_CHARS:
+                    end = max(text.rfind(" "), 0)
+            if not text[:end].strip():
+                if final:
+                    self._caption = ""
+                return
+            # Pieces carry their own spaces, so the split keeps them for the
+            # assistant aggregator, which joins captions as they are.
+            caption, self._caption = text[:end], text[end:]
+            frame = TTSTextFrame(caption, aggregated_by=AggregationType.SENTENCE)
+            frame.includes_inter_frame_spaces = True
+            await super().push_frame(frame)
+
+        async def _close_session(self):
+            self._closing_on_request = True
+            try:
+                await super()._close_session()
+            finally:
+                self._closing_on_request = False
+
+        async def _handle_evt_session_closed(self, evt):
+            await super()._handle_evt_session_closed(evt)
+            if self._closing_on_request or self._disconnecting:
+                return
+            now = time.monotonic()
+            self._recovery_times = [
+                started
+                for started in self._recovery_times
+                if now - started < OPENAI_LIVE_RECOVERY_WINDOW_SECS
+            ]
+            if len(self._recovery_times) >= OPENAI_LIVE_MAX_RECOVERIES:
+                logger.error(
+                    "OpenAI Live closed {} sessions within {}s; not reconnecting (reason: {})",
+                    len(self._recovery_times),
+                    OPENAI_LIVE_RECOVERY_WINDOW_SECS,
+                    evt.reason,
+                )
+                return
+            self._recovery_times.append(now)
+            logger.warning("OpenAI Live closed the session ({}); starting a new one", evt.reason)
+            # The server drops the socket next. Treat that as our own disconnect
+            # so it does not mark the service unusable before the reset replaces it.
+            self._disconnecting = True
+            self.create_task(self._recover_session(), "openai-live-recovery")
+
+        async def _recover_session(self):
+            if self._context is not None:
+                # A trailing developer message is spoken when the session opens.
+                self._context.add_message(
+                    {"role": "developer", "content": OPENAI_LIVE_RECOVERY_INSTRUCTION}
+                )
+            await self.reset_conversation()
 
     instructions = _effective_instructions(flow)
     backend_settings = OpenAIResponsesLLMService.Settings(
@@ -4635,7 +4734,7 @@ def _openai_live_service(
     )
     if flow.reasoning_effort:
         backend_settings.reasoning = OpenAIResponsesReasoningConfig(effort=flow.reasoning_effort)
-    return OpenAILiveLLMService(
+    return ResilientOpenAILiveLLMService(
         api_key=api_key,
         settings=OpenAILiveLLMService.Settings(
             model=model,
