@@ -30,6 +30,7 @@ jobs:
           python -m unittest \
             tests.test_va_pipecat_protocol \
             tests.test_esphome_provisioner \
+            tests.test_versions \
             -v
 
   docker:

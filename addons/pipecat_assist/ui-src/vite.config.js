@@ -6,6 +6,9 @@ const version = JSON.parse(readFileSync(new URL("./package.json", import.meta.ur
 
 export default defineConfig({
   base: "./",
+  define: {
+    __PIPECAT_ASSIST_VERSION__: JSON.stringify(version),
+  },
   plugins: [
     react(),
     {

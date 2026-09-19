@@ -239,7 +239,14 @@ class OpenAILiveCaptionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OpenAILiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_session_closed_by_the_api_is_reopened_and_explained(self):
+    async def _run_against_fake_live_api(self, scripts: list[str], messages: list[dict]):
+        """Run the service against a local Live API stand-in, one script per connection.
+
+        ``moderate`` stops the reply after the session starts and
+        ``moderate_at_startup`` stops it before, as the API did in the browser
+        tests; any other script closes the session with that reason, and
+        ``serve`` keeps the session open until the service speaks.
+        """
         from pipecat.frames.frames import LLMContextFrame
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -247,26 +254,38 @@ class OpenAILiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
         from websockets.asyncio.server import serve
 
         connections: list[list[dict]] = []
-        recovered = asyncio.Event()
+        spoke = asyncio.Event()
+        moderation_error = {
+            "type": "error",
+            "error": {
+                "type": "content_filter",
+                "code": "content_filter",
+                "message": "The generation was stopped due to moderation.",
+            },
+        }
 
         async def fake_live_api(websocket):
             received: list[dict] = []
             connections.append(received)
-            first = len(connections) == 1
+            script = scripts[len(connections) - 1]
             async for raw in websocket:
                 event = json.loads(raw)
                 received.append(event)
                 if event["type"] == "session.start":
-                    started = {"type": "session.started", "session": {"id": f"live_{len(connections)}"}}
-                    await websocket.send(json.dumps(started))
-                    if first:
-                        # What the API did after a moderation stop.
-                        await websocket.send(json.dumps({"type": "session.closed", "reason": "content"}))
-                        await asyncio.sleep(0.2)
-                        await websocket.close()
-                        return
-                elif event["type"] == "session.commentary.append" and not first:
-                    recovered.set()
+                    if script != "moderate_at_startup":
+                        started = {"type": "session.started", "session": {"id": f"live_{len(connections)}"}}
+                        await websocket.send(json.dumps(started))
+                    if script == "serve":
+                        continue
+                    if script.startswith("moderate"):
+                        await websocket.send(json.dumps(moderation_error))
+                    reason = "content" if script.startswith("moderate") else script
+                    await websocket.send(json.dumps({"type": "session.closed", "reason": reason}))
+                    await asyncio.sleep(0.2)
+                    await websocket.close()
+                    return
+                if event["type"] == "session.commentary.append" and script == "serve":
+                    spoke.set()
 
         config = default_config_from_environment()
         llm = main._openai_live_service(
@@ -276,7 +295,6 @@ class OpenAILiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
             integration=config.integration("openai"),
             backend_model="gpt-5.4-mini",
         )
-        context = LLMContext([{"role": "developer", "content": "Greet the user."}])
 
         async with serve(fake_live_api, "127.0.0.1", 0) as server:
             port = next(iter(server.sockets)).getsockname()[1]
@@ -285,16 +303,46 @@ class OpenAILiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
             runner = WorkerRunner(handle_sigint=False)
             await runner.add_workers(worker)
             running = asyncio.create_task(runner.run())
-            await worker.queue_frames([LLMContextFrame(context)])
+            await worker.queue_frames([LLMContextFrame(LLMContext(messages))])
             try:
-                await asyncio.wait_for(recovered.wait(), timeout=10)
+                await asyncio.wait_for(spoke.wait(), timeout=10)
+                usable = llm.is_usable
             finally:
                 await worker.cancel()
                 await asyncio.wait_for(running, timeout=10)
 
+        return connections, usable
+
+    async def test_moderation_stop_restarts_without_the_stopped_conversation(self):
+        conversation = [
+            {"role": "developer", "content": "Greet the user."},
+            {"role": "user", "content": "Paljonko kello on?"},
+            {"role": "assistant", "content": "Hetki, tarkistan."},
+        ]
+
+        connections, usable = await self._run_against_fake_live_api(
+            ["moderate", "moderate_at_startup", "serve"],
+            conversation,
+        )
+
+        self.assertTrue(usable)
+        self.assertEqual(len(connections), 3)
+        self.assertEqual(len(connections[0][0]["session"]["input"]), 3)
+        for restart in connections[1:]:
+            self.assertEqual(restart[0]["type"], "session.start")
+            self.assertNotIn("input", restart[0]["session"])
+        commentary = [event for event in connections[2] if event["type"] == "session.commentary.append"]
+        self.assertIn("cut off", commentary[0]["content"])
+
+    async def test_other_session_close_restarts_with_the_conversation(self):
+        connections, usable = await self._run_against_fake_live_api(
+            ["expired", "serve"],
+            [{"role": "developer", "content": "Greet the user."}],
+        )
+
+        self.assertTrue(usable)
         self.assertEqual(len(connections), 2)
         restart = connections[1][0]
-        self.assertEqual(restart["type"], "session.start")
         self.assertEqual(
             [item["content"][0]["text"] for item in restart["session"]["input"]],
             ["Greet the user."],

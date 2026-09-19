@@ -4633,6 +4633,7 @@ def _openai_live_service(
 
     from pipecat.frames.frames import AggregationType, TTSStoppedFrame, TTSTextFrame
     from pipecat.processors.frame_processor import FrameDirection
+    from pipecat.services.openai.live import events as live_events
     from pipecat.services.openai.live.llm import OpenAILiveLLMService
     from pipecat.services.openai.responses.llm import (
         OpenAIResponsesLLMService,
@@ -4644,7 +4645,9 @@ def _openai_live_service(
 
         The API closes a session on its own, for example after a moderation
         stop. Pipecat then treats the dropped connection as permanent and the
-        call goes silent, so reopen a session seeded from the context instead.
+        call goes silent, so open a new session instead. After a moderation
+        stop the new session starts without the earlier turns: replaying them
+        makes the model resume the stopped answer and trips moderation again.
 
         Captions are also passed on a sentence at a time: gpt-live streams its
         transcript in word pieces, which the UI and the Lovelace card would
@@ -4655,6 +4658,9 @@ def _openai_live_service(
             super().__init__(*args, **kwargs)
             self._closing_on_request = False
             self._recovery_times: list[float] = []
+            self._recovery_instruction: str | None = None
+            self._recovery_drops_history = False
+            self._starting_session = False
             self._caption = ""
 
         async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
@@ -4694,10 +4700,57 @@ def _openai_live_service(
             finally:
                 self._closing_on_request = False
 
+        async def _send_session_config(self):
+            self._starting_session = True
+            try:
+                await super()._send_session_config()
+            finally:
+                self._starting_session = False
+
+        def _invocation_params(self):
+            params = super()._invocation_params()
+            if self._starting_session and self._recovery_instruction:
+                instruction, self._recovery_instruction = self._recovery_instruction, None
+                history = [] if self._recovery_drops_history else params["input"]
+                # The service speaks a trailing developer item when the session opens.
+                params["input"] = [
+                    *history,
+                    live_events.InputItem(
+                        role="developer",
+                        content=[live_events.InputTextContent(text=instruction)],
+                    ),
+                ]
+            return params
+
+        async def _handle_evt_error(self, evt):
+            if evt.error.code == "content_filter":
+                # session.closed follows and decides whether to recover, so a
+                # moderation stop must not mark the service unusable first.
+                await self.push_error(
+                    error_msg=f"OpenAI Live moderation stopped the response: {evt.error.message}"
+                )
+                return
+            await super()._handle_evt_error(evt)
+
+        def _last_user_text(self) -> str:
+            if self._user_turn.text.strip():
+                return self._user_turn.text
+            for message in reversed(self._context.get_messages() if self._context else []):
+                if isinstance(message, dict) and message.get("role") == "user":
+                    return str(message.get("content") or "")
+            return ""
+
         async def _handle_evt_session_closed(self, evt):
             await super()._handle_evt_session_closed(evt)
             if self._closing_on_request or self._disconnecting:
                 return
+            moderated = evt.reason == "content"
+            if moderated:
+                logger.debug(
+                    "OpenAI Live moderation stopped the reply {!r} after the user said {!r}",
+                    self._assistant_turn.text[-300:],
+                    self._last_user_text()[-300:],
+                )
             now = time.monotonic()
             self._recovery_times = [
                 started
@@ -4713,19 +4766,17 @@ def _openai_live_service(
                 )
                 return
             self._recovery_times.append(now)
-            logger.warning("OpenAI Live closed the session ({}); starting a new one", evt.reason)
+            logger.warning(
+                "OpenAI Live closed the session ({}); starting a new one{}",
+                evt.reason,
+                " without the earlier turns" if moderated else "",
+            )
+            self._recovery_instruction = OPENAI_LIVE_RECOVERY_INSTRUCTION
+            self._recovery_drops_history = moderated
             # The server drops the socket next. Treat that as our own disconnect
             # so it does not mark the service unusable before the reset replaces it.
             self._disconnecting = True
-            self.create_task(self._recover_session(), "openai-live-recovery")
-
-        async def _recover_session(self):
-            if self._context is not None:
-                # A trailing developer message is spoken when the session opens.
-                self._context.add_message(
-                    {"role": "developer", "content": OPENAI_LIVE_RECOVERY_INSTRUCTION}
-                )
-            await self.reset_conversation()
+            self.create_task(self.reset_conversation(), "openai-live-recovery")
 
     instructions = _effective_instructions(flow)
     backend_settings = OpenAIResponsesLLMService.Settings(

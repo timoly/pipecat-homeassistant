@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.83
+
+- Start the replacement OpenAI Live session without the earlier turns after a
+  moderation stop; replaying them made the model resume the stopped answer and
+  trip moderation again on every retry.
+- Keep a moderation stop during session startup from marking the OpenAI Live
+  service unusable, and speak the "answer was cut off" notice reliably.
+- Log what the user said and what the assistant was saying when moderation
+  stops an OpenAI Live reply, at debug level.
+- Show the released version in the assistant card instead of a stale
+  hard-coded one, and check that the add-on, Python, and UI versions match.
+
 ## 0.1.82
 
 - Fix Home Assistant MCP tool calls on Pipecat 1.11, whose MCP client no
