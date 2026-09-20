@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.85
+
+- Support OpenAI Live on ESPHome `va_pipecat` satellites such as the Home
+  Assistant Voice Preview Edition. A Live session opens on the wake word, or
+  when the microphone starts streaming, and closes when the follow-up window
+  runs out, the user stops, the assistant says goodbye, or nothing has been
+  said for a while, so an always-connected satellite is only billed while it
+  talks. Audio captured while a session starts is sent once it is ready.
+- Do not send OpenAI Live's streamed silence to satellites, end a satellite
+  reply when the model's turn ends rather than at its first pause, and report
+  hearing the user so the device's no-speech watchdog does not cut in.
+- Recognize Finnish goodbyes such as "kiitos, siinä kaikki" and "näkemiin".
+- Move the OpenAI Live services to `app/openai_live.py`.
+
 ## 0.1.84
 
 - Drop optional MCP tool arguments that a model filled with an empty value

@@ -57,7 +57,12 @@ def _phrase_ready(text: str, emitted: str, word_limit: int) -> bool:
 
 @dataclass
 class VaPipecatProtocol:
-    """Track one ESPHome conversation and translate RTVI events to compact JSON."""
+    """Track one ESPHome conversation and translate RTVI events to compact JSON.
+
+    With ``live_sessions`` the model streams speech continuously and pauses
+    mid-reply, so a reply ends with the model's own turn (``bot-tts-stopped``)
+    rather than with the first pause in its audio (``bot-stopped-speaking``).
+    """
 
     should_end_conversation: Callable[..., bool]
     input_sample_rate: int = 16000
@@ -67,6 +72,7 @@ class VaPipecatProtocol:
     follow_up_open_delay_ms: int = 80
     wake_open_delay_ms: int = 0
     playback_prebuffer_ms: int = 300
+    live_sessions: bool = False
     turn_id: int = 0
     active: bool = False
     stop_requested: bool = False
@@ -233,6 +239,11 @@ class VaPipecatProtocol:
             self.assistant_text = ""
             self.assistant_emitted_text = ""
             self.assistant_priority = 0
+            if self.live_sessions:
+                # Wake already set listening, but the device keeps its
+                # no-speech watchdog running until the server reports hearing
+                # the user, and a live session takes a moment to start.
+                return self.phase_message("listening", heard=True)
             return self.phase_message("listening")
 
         if message_type in {"user-stopped-speaking", "vad-user-stopped-speaking"}:
@@ -258,6 +269,9 @@ class VaPipecatProtocol:
             "bot-llm-started",
             "bot-tts-started",
         }:
+            if self.live_sessions:
+                # A live turn opens as the model starts to speak, not before.
+                return None
             return self.phase_message("thinking")
 
         if message_type == "llm-function-call-started":
@@ -321,30 +335,11 @@ class VaPipecatProtocol:
             self.current_phase = "listening"
             return self.interrupt_message("barge_in")
 
-        if message_type == "bot-stopped-speaking":
-            if self.active_tool_calls or self.tool_start_pending:
-                return self.phase_message("thinking")
-            assistant_text = self.assistant_text
-            terminal = self.stop_requested or self.should_end_conversation(
-                self.last_user_text,
-                assistant_text,
-            )
-            self.active = not terminal
-            self.stop_requested = False
-            next_phase = "thanks" if terminal else "listening"
-            phase_extra = {"terminal": True} if terminal else {"follow_up": True}
-            if assistant_text and assistant_text != self.assistant_emitted_text:
-                self.assistant_emitted_text = assistant_text
-                return self.transcript_message(
-                    "assistant",
-                    assistant_text,
-                    True,
-                    phase=next_phase,
-                    **phase_extra,
-                )
-            if terminal:
-                return self.phase_message("thanks", terminal=True)
-            return self.phase_message("listening", follow_up=True)
+        if message_type == "bot-stopped-speaking" and not self.live_sessions:
+            return self._reply_finished()
+
+        if message_type == "bot-tts-stopped" and self.live_sessions:
+            return self._reply_finished()
 
         if message_type in {"error", "error-response"}:
             return self.error_message(
@@ -353,3 +348,30 @@ class VaPipecatProtocol:
             )
 
         return None
+
+    def _reply_finished(self) -> str | None:
+        """Open the follow-up window, or end the conversation after a goodbye."""
+
+        if self.active_tool_calls or self.tool_start_pending:
+            return self.phase_message("thinking")
+        assistant_text = self.assistant_text
+        terminal = self.stop_requested or self.should_end_conversation(
+            self.last_user_text,
+            assistant_text,
+        )
+        self.active = not terminal
+        self.stop_requested = False
+        next_phase = "thanks" if terminal else "listening"
+        phase_extra = {"terminal": True} if terminal else {"follow_up": True}
+        if assistant_text and assistant_text != self.assistant_emitted_text:
+            self.assistant_emitted_text = assistant_text
+            return self.transcript_message(
+                "assistant",
+                assistant_text,
+                True,
+                phase=next_phase,
+                **phase_extra,
+            )
+        if terminal:
+            return self.phase_message("thanks", terminal=True)
+        return self.phase_message("listening", follow_up=True)

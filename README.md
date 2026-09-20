@@ -243,12 +243,18 @@ backend OpenAI text model: the pipeline's text model when it is an OpenAI
 model, otherwise the OpenAI Cloud default model or `gpt-5.4-mini`. The reasoning
 effort setting applies to that backend model.
 
-OpenAI Live bills every minute a session is open. ESPHome `va_pipecat`
-satellites keep their session open from boot, so they reject OpenAI Live
-pipelines; keep another pipeline active for satellites. Standalone
-`pipecat-esp32` clients use the same `/api/offer` endpoint as browsers and are
-not blocked, so do not point an always-connected device at an OpenAI Live
-pipeline.
+OpenAI Live bills every minute a session is open, silence included. Browser
+and Lovelace calls end after five minutes without speech. ESPHome `va_pipecat`
+satellites keep their connection open from boot, so for them the add-on opens
+a Live session per conversation: on the wake word (or when the microphone
+starts streaming) and until the follow-up window runs out, the user stops the
+conversation, the assistant says goodbye, or nothing is said for the
+follow-up window plus 15 seconds. Microphone audio captured while the session
+starts is sent once it is ready. Every second of the follow-up window is
+billed, so consider lowering **Runtime > ESPHome satellite > Follow-up listening (ms)**
+for OpenAI Live pipelines. Standalone `pipecat-esp32` clients use the same
+`/api/offer` endpoint as browsers and hold a call open, so do not point an
+always-connected device at an OpenAI Live pipeline.
 
 ## Home Assistant Assist and Lovelace
 

@@ -237,5 +237,43 @@ class VaPipecatProtocolTests(unittest.TestCase):
         self.assertEqual(hello["playback_prebuffer_ms"], 180)
 
 
+class LiveSessionProtocolTests(unittest.TestCase):
+    """gpt-live streams speech continuously and pauses mid-reply."""
+
+    def setUp(self):
+        self.protocol = VaPipecatProtocol(_never_terminal, live_sessions=True)
+        self.protocol.client_action('{"type":"wake"}')
+
+    def rtvi(self, message_type: str, data: dict | None = None) -> str | None:
+        return self.protocol.on_rtvi_message({"label": "rtvi-ai", "type": message_type, "data": data or {}})
+
+    def test_hearing_the_user_is_reported_although_wake_already_listens(self):
+        heard = json.loads(self.rtvi("user-started-speaking"))
+
+        self.assertEqual((heard["phase"], heard["heard"]), ("listening", True))
+
+    def test_a_pause_in_the_reply_does_not_open_the_follow_up(self):
+        self.rtvi("user-stopped-speaking")
+        self.rtvi("bot-started-speaking")
+        self.rtvi("bot-tts-text", {"text": "Katsotaanpa."})
+
+        self.assertIsNone(self.rtvi("bot-tts-started"))
+        self.assertIsNone(self.rtvi("bot-stopped-speaking"))
+        self.assertEqual(self.protocol.current_phase, "speaking")
+
+        follow_up = json.loads(self.rtvi("bot-tts-stopped"))
+        self.assertEqual(follow_up["phase"], "listening")
+        self.assertTrue(follow_up["follow_up"])
+
+    def test_classic_sessions_still_end_the_reply_on_the_first_silence(self):
+        protocol = VaPipecatProtocol(_never_terminal)
+        protocol.client_action('{"type":"wake"}')
+        protocol.on_rtvi_message({"label": "rtvi-ai", "type": "bot-started-speaking"})
+
+        self.assertIsNone(protocol.on_rtvi_message({"label": "rtvi-ai", "type": "bot-tts-stopped"}))
+        follow_up = json.loads(protocol.on_rtvi_message({"label": "rtvi-ai", "type": "bot-stopped-speaking"}))
+        self.assertTrue(follow_up["follow_up"])
+
+
 if __name__ == "__main__":
     unittest.main()

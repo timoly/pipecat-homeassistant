@@ -99,6 +99,11 @@ from app.audio_debug import (
     list_audio_recordings,
 )
 from app.esphome_provisioner import ESPHomeProvisioner
+from app.openai_live import (
+    TOOL_GUIDANCE as OPENAI_LIVE_TOOL_GUIDANCE,
+    ResilientOpenAILiveLLMService,
+    SatelliteOpenAILiveLLMService,
+)
 from app.mcp_bridge import (
     CombinedMCPBridge,
     check_mcp,
@@ -173,27 +178,6 @@ HA_LIVE_RESULT_TIMEOUT_SECONDS = 75
 HA_LIVE_TURNS_BY_TRANSCRIPT: dict[tuple[str, str], "HALiveTurn"] = {}
 HA_LIVE_TURNS_BY_SPEECH: dict[tuple[str, str], "HALiveTurn"] = {}
 HA_ASSIST_WARMUP_TASK: asyncio.Task | None = None
-# ESPHome satellites hold their session open from boot, and OpenAI Live bills
-# every open session minute, so a satellite would cost the same as 24/7 use.
-ESPHOME_OPENAI_LIVE_UNSUPPORTED = (
-    "OpenAI Live (gpt-live) is not supported on ESPHome satellites. Select another pipeline."
-)
-ESPHOME_OPENAI_LIVE_WARNED: set[tuple[str, str]] = set()
-OPENAI_LIVE_MAX_RECOVERIES = 3
-OPENAI_LIVE_RECOVERY_WINDOW_SECS = 120
-OPENAI_LIVE_RECOVERY_INSTRUCTION = (
-    "The previous voice session ended before your last answer finished. Briefly tell "
-    "the user that your answer was cut off and ask them to repeat their request."
-)
-OPENAI_LIVE_TOOL_GUIDANCE = (
-    "When you call Home Assistant tools, pass only the arguments the request needs. "
-    "Leave every other optional argument null instead of guessing a value: do not "
-    "add a floor, area, color, or temperature the user did not ask for, and use "
-    "device names exactly as GetLiveContext reports them."
-)
-# Sentence punctuation that the next caption piece has already followed with a space.
-OPENAI_LIVE_SENTENCE_END_RE = re.compile(r"[.!?…]+[\"')\]»”]*(?=\s)")
-OPENAI_LIVE_CAPTION_MAX_CHARS = 200
 ESPHOME_PROVISIONER = ESPHomeProvisioner(
     STORE.load,
     supervisor_url=SUPERVISOR_URL,
@@ -883,31 +867,6 @@ async def api_esphome_satellite(websocket: WebSocket):
         or str(websocket.client.host if websocket.client else "")
         or f"esphome-{uuid.uuid4().hex[:12]}"
     )
-    if _flow_uses_openai_live(config, flow):
-        # The device retries with backoff, so warn once per satellite and flow.
-        if (client_id, flow.id) not in ESPHOME_OPENAI_LIVE_WARNED:
-            ESPHOME_OPENAI_LIVE_WARNED.add((client_id, flow.id))
-            logger.warning(
-                "ESPHome satellite {} rejected for flow {}: {}",
-                client_id,
-                flow.id,
-                ESPHOME_OPENAI_LIVE_UNSUPPORTED,
-            )
-        protocol = _va_pipecat_protocol(config)
-        await websocket.accept()
-        with suppress(Exception):
-            await websocket.send_text(protocol.hello())
-            await websocket.send_text(
-                protocol.error_message(
-                    "unsupported_pipeline",
-                    ESPHOME_OPENAI_LIVE_UNSUPPORTED,
-                    recoverable=False,
-                )
-            )
-        with suppress(Exception):
-            await websocket.close(code=4400, reason="OpenAI Live is not supported on ESPHome satellites")
-        return
-
     session_id = str(uuid.uuid4())
     await websocket.accept()
     await websocket.send_text(_va_pipecat_protocol(config).hello())
@@ -1988,6 +1947,9 @@ def _should_end_conversation(*texts: str | None) -> bool:
         r"\b(end conversation|stop listening|we are done|goodbye|bye for now)\b",
         r"\b(milego dnia|do uslyszenia|do zobaczenia|na razie)\b",
         r"\b(have a nice day|talk to you later|see you later)\b",
+        r"\b(siina kaikki|se oli siina|kiitos ei muuta|ei muuta kiitos|lopetetaan)\b",
+        r"\b(lopeta kuuntelu|lopeta keskustelu|lopetetaan keskustelu)\b",
+        r"\b(nakemiin|kuulemiin|hei hei|heippa|nahdaan|hyvaa paivanjatkoa|hyvaa yota)\b",
     )
     short_end_pattern = re.compile(
         r"^(?:ok|okej|dobra|no|dziekuje|dzieki|thanks|thank you)?\s*"
@@ -2804,6 +2766,7 @@ def _transport_params(config: RuntimeConfig, flow: FlowConfig) -> dict[str, Any]
             follow_up_open_delay_ms=config.esphome_follow_up_open_delay_ms,
             wake_open_delay_ms=config.esphome_wake_open_delay_ms,
             playback_prebuffer_ms=config.esphome_playback_prebuffer_ms,
+            live_sessions=_flow_uses_openai_live(config, flow),
         ),
     }
 
@@ -4606,29 +4569,6 @@ def _openai_realtime_service(
     )
 
 
-def _nullable_optional_parameters(tool: dict[str, Any]) -> dict[str, Any]:
-    """Let a model leave optional tool arguments null instead of inventing values.
-
-    The OpenAI Live backend fills in every tool argument, so without a null
-    option it sends empty strings, zeros, or guesses for the ones it does not
-    need. The MCP bridge drops the nulls before calling Home Assistant.
-    """
-
-    parameters = tool.get("parameters")
-    if tool.get("type") != "function" or not isinstance(parameters, dict):
-        return tool
-    required = set(parameters.get("required") or [])
-    properties = {}
-    for name, schema in (parameters.get("properties") or {}).items():
-        kind = schema.get("type") if isinstance(schema, dict) else None
-        if name not in required and isinstance(kind, str) and kind != "null":
-            schema = {**schema, "type": [kind, "null"]}
-            if isinstance(schema.get("enum"), list):
-                schema["enum"] = [*schema["enum"], None]
-        properties[name] = schema
-    return {**tool, "parameters": {**parameters, "properties": properties}}
-
-
 def _openai_live_backend_model(config: RuntimeConfig, flow: FlowConfig) -> str:
     """Return the OpenAI text model that gpt-live delegates tool use and reasoning to."""
 
@@ -4655,171 +4595,21 @@ def _openai_live_service(
     flow: FlowConfig,
     integration: IntegrationConfig | None,
     backend_model: str,
+    satellite_config: RuntimeConfig | None = None,
 ):
     """Build a full-duplex OpenAI Live service.
 
     gpt-live handles turn taking and barge-in itself. Tool calls, including
     Home Assistant MCP tools, run through Responses delegation: OpenAI hosts
     the backend text model and Pipecat executes its function calls with the
-    handlers registered on this service.
+    handlers registered on this service. With ``satellite_config`` the
+    service holds a session only while an ESPHome conversation runs.
     """
 
-    from pipecat.frames.frames import AggregationType, TTSStoppedFrame, TTSTextFrame
-    from pipecat.processors.frame_processor import FrameDirection
-    from pipecat.services.openai.live import events as live_events
-    from pipecat.services.openai.live.llm import OpenAILiveLLMService
     from pipecat.services.openai.responses.llm import (
         OpenAIResponsesLLMService,
         OpenAIResponsesReasoningConfig,
     )
-
-    class ResilientOpenAILiveLLMService(OpenAILiveLLMService):
-        """Start a new session when the Live API ends one mid-conversation.
-
-        The API closes a session on its own, for example after a moderation
-        stop. Pipecat then treats the dropped connection as permanent and the
-        call goes silent, so open a new session instead. After a moderation
-        stop the new session starts without the earlier turns: replaying them
-        makes the model resume the stopped answer and trips moderation again.
-
-        Captions are also passed on a sentence at a time: gpt-live streams its
-        transcript in word pieces, which the UI and the Lovelace card would
-        otherwise merge as if each piece were a word.
-        """
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._closing_on_request = False
-            self._recovery_times: list[float] = []
-            self._recovery_instruction: str | None = None
-            self._recovery_drops_history = False
-            self._starting_session = False
-            self._caption = ""
-
-        async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
-            if direction == FrameDirection.DOWNSTREAM:
-                if isinstance(frame, TTSTextFrame):
-                    self._caption += frame.text
-                    await self._push_caption(final=False)
-                    return
-                if isinstance(frame, TTSStoppedFrame):
-                    await self._push_caption(final=True)
-            await super().push_frame(frame, direction)
-
-        async def _push_caption(self, *, final: bool):
-            text = self._caption
-            end = len(text) if final else 0
-            if not final:
-                sentence_ends = [match.end() for match in OPENAI_LIVE_SENTENCE_END_RE.finditer(text)]
-                if sentence_ends:
-                    end = sentence_ends[-1]
-                elif len(text) > OPENAI_LIVE_CAPTION_MAX_CHARS:
-                    end = max(text.rfind(" "), 0)
-            if not text[:end].strip():
-                if final:
-                    self._caption = ""
-                return
-            # Pieces carry their own spaces, so the split keeps them for the
-            # assistant aggregator, which joins captions as they are.
-            caption, self._caption = text[:end], text[end:]
-            frame = TTSTextFrame(caption, aggregated_by=AggregationType.SENTENCE)
-            frame.includes_inter_frame_spaces = True
-            await super().push_frame(frame)
-
-        async def _close_session(self):
-            self._closing_on_request = True
-            try:
-                await super()._close_session()
-            finally:
-                self._closing_on_request = False
-
-        async def _send_session_config(self):
-            self._starting_session = True
-            try:
-                await super()._send_session_config()
-            finally:
-                self._starting_session = False
-
-        def _invocation_params(self):
-            params = super()._invocation_params()
-            params["tools"] = [_nullable_optional_parameters(tool) for tool in params["tools"]]
-            if self._starting_session and self._recovery_instruction:
-                instruction, self._recovery_instruction = self._recovery_instruction, None
-                history = [] if self._recovery_drops_history else params["input"]
-                # The service speaks a trailing developer item when the session opens.
-                params["input"] = [
-                    *history,
-                    live_events.InputItem(
-                        role="developer",
-                        content=[live_events.InputTextContent(text=instruction)],
-                    ),
-                ]
-            return params
-
-        async def _handle_evt_session_started(self, evt):
-            output = (evt.session.audio or {}).get("output") or {}
-            logger.info(
-                "OpenAI Live session voice: requested {}, using {}",
-                self._settings.voice,
-                output.get("voice") or "unreported",
-            )
-            await super()._handle_evt_session_started(evt)
-
-        async def _handle_evt_error(self, evt):
-            if evt.error.code == "content_filter":
-                # session.closed follows and decides whether to recover, so a
-                # moderation stop must not mark the service unusable first.
-                await self.push_error(
-                    error_msg=f"OpenAI Live moderation stopped the response: {evt.error.message}"
-                )
-                return
-            await super()._handle_evt_error(evt)
-
-        def _last_user_text(self) -> str:
-            if self._user_turn.text.strip():
-                return self._user_turn.text
-            for message in reversed(self._context.get_messages() if self._context else []):
-                if isinstance(message, dict) and message.get("role") == "user":
-                    return str(message.get("content") or "")
-            return ""
-
-        async def _handle_evt_session_closed(self, evt):
-            await super()._handle_evt_session_closed(evt)
-            if self._closing_on_request or self._disconnecting:
-                return
-            moderated = evt.reason == "content"
-            if moderated:
-                logger.debug(
-                    "OpenAI Live moderation stopped the reply {!r} after the user said {!r}",
-                    self._assistant_turn.text[-300:],
-                    self._last_user_text()[-300:],
-                )
-            now = time.monotonic()
-            self._recovery_times = [
-                started
-                for started in self._recovery_times
-                if now - started < OPENAI_LIVE_RECOVERY_WINDOW_SECS
-            ]
-            if len(self._recovery_times) >= OPENAI_LIVE_MAX_RECOVERIES:
-                logger.error(
-                    "OpenAI Live closed {} sessions within {}s; not reconnecting (reason: {})",
-                    len(self._recovery_times),
-                    OPENAI_LIVE_RECOVERY_WINDOW_SECS,
-                    evt.reason,
-                )
-                return
-            self._recovery_times.append(now)
-            logger.warning(
-                "OpenAI Live closed the session ({}); starting a new one{}",
-                evt.reason,
-                " without the earlier turns" if moderated else "",
-            )
-            self._recovery_instruction = OPENAI_LIVE_RECOVERY_INSTRUCTION
-            self._recovery_drops_history = moderated
-            # The server drops the socket next. Treat that as our own disconnect
-            # so it does not mark the service unusable before the reset replaces it.
-            self._disconnecting = True
-            self.create_task(self.reset_conversation(), "openai-live-recovery")
 
     instructions = _effective_instructions(flow)
     backend_settings = OpenAIResponsesLLMService.Settings(
@@ -4828,14 +4618,27 @@ def _openai_live_service(
     )
     if flow.reasoning_effort:
         backend_settings.reasoning = OpenAIResponsesReasoningConfig(effort=flow.reasoning_effort)
-    return ResilientOpenAILiveLLMService(
-        api_key=api_key,
-        settings=OpenAILiveLLMService.Settings(
+    service_kwargs = {
+        "api_key": api_key,
+        "settings": ResilientOpenAILiveLLMService.Settings(
             model=model,
             system_instruction=instructions,
             voice=_openai_voice(flow, integration),
         ),
-        delegation=OpenAILiveLLMService.ResponsesDelegation(settings=backend_settings),
+        "delegation": ResilientOpenAILiveLLMService.ResponsesDelegation(settings=backend_settings),
+    }
+    if satellite_config is None:
+        return ResilientOpenAILiveLLMService(**service_kwargs)
+    return SatelliteOpenAILiveLLMService(
+        **service_kwargs,
+        should_end_conversation=_should_end_conversation,
+        # Longer than the device's follow-up window, which ends a conversation
+        # on its own, so this only catches devices that never do.
+        idle_timeout_secs=satellite_config.esphome_follow_up_ms / 1000 + 15,
+        history_messages=(
+            satellite_config.session_memory_max_messages if _memory_enabled(satellite_config, flow) else 0
+        ),
+        history_reuse_secs=satellite_config.session_memory_reuse_seconds,
     )
 
 
@@ -5300,8 +5103,6 @@ async def run_bot(
         else:
             realtime_model = _model_name(flow, integration, provider_kind)
             openai_live = is_openai_live_model(realtime_model)
-            if openai_live and is_esphome_satellite:
-                raise RuntimeError(ESPHOME_OPENAI_LIVE_UNSUPPORTED)
             if openai_live:
                 backend_model = _openai_live_backend_model(config, flow)
                 logger.info("OpenAI Live delegates tool use to {}", backend_model)
@@ -5311,6 +5112,7 @@ async def run_bot(
                     flow=flow,
                     integration=integration,
                     backend_model=backend_model,
+                    satellite_config=config if is_esphome_satellite else None,
                 )
             else:
                 llm = _openai_realtime_service(
@@ -5332,9 +5134,11 @@ async def run_bot(
         if bridge and mcp_tools_schema:
             await bridge.register_tools_schema(mcp_tools_schema, llm)
 
+        # gpt-live speaks a trailing developer message when a session opens,
+        # and on a satellite the user speaks first.
         greeting_messages = (
             [{"role": "developer", "content": flow.greeting}]
-            if flow.greeting.strip()
+            if flow.greeting.strip() and not (openai_live and is_esphome_satellite)
             else []
         )
         context_messages = SESSION_MEMORY.restore(
@@ -5400,7 +5204,8 @@ async def run_bot(
             logger.info("Client connected to flow {}", flow.id)
             if _flow_enabled(flow):
                 logger.warning("Pipecat Flows are ignored for speech-to-speech runtime {}", provider_kind)
-            # A gpt-live session only starts on the first context frame.
+            # A gpt-live session starts on the first context frame; a
+            # satellite's waits for the wake word.
             if is_esphome_satellite or flow.greeting.strip() or openai_live:
                 await worker.queue_frames([LLMRunFrame()])
 

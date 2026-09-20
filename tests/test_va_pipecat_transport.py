@@ -13,8 +13,11 @@ sys.path.insert(0, str(ADDON_ROOT))
 from app.va_pipecat import (  # noqa: E402
     CHANNELS,
     INPUT_SAMPLE_RATE,
+    LIVE_SILENCE_HANGOVER_SECS,
     OUTPUT_PACKET_BYTES,
     OUTPUT_SAMPLE_RATE,
+    SatelliteConversationEndFrame,
+    SatelliteWakeFrame,
     VaPipecatFrameSerializer,
     websocket_transport_params,
 )
@@ -87,6 +90,51 @@ class VaPipecatTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hello["follow_up_open_delay_ms"], 150)
         self.assertEqual(hello["wake_open_delay_ms"], 50)
         self.assertEqual(hello["playback_prebuffer_ms"], 180)
+
+
+class LiveSessionTransportTests(unittest.IsolatedAsyncioTestCase):
+    """Satellite transport for models that hold a session per conversation."""
+
+    def setUp(self):
+        self.serializer = VaPipecatFrameSerializer(_never_terminal, live_sessions=True)
+
+    @staticmethod
+    def _audio(sample: int) -> OutputAudioRawFrame:
+        return OutputAudioRawFrame(
+            audio=sample.to_bytes(2, "little", signed=True) * (OUTPUT_PACKET_BYTES // 2),
+            sample_rate=OUTPUT_SAMPLE_RATE,
+            num_channels=CHANNELS,
+        )
+
+    async def test_device_messages_become_conversation_frames(self):
+        self.assertIsInstance(await self.serializer.deserialize('{"type":"wake"}'), SatelliteWakeFrame)
+        stopped = await self.serializer.deserialize('{"type":"stop"}')
+        flushed = await self.serializer.deserialize('{"type":"flush"}')
+        self.assertIsInstance(stopped, SatelliteConversationEndFrame)
+        self.assertIsInstance(flushed, SatelliteConversationEndFrame)
+        self.assertIsInstance(await self.serializer.deserialize('{"type":"interrupt"}'), InterruptionWorkerFrame)
+
+    async def test_classic_sessions_keep_their_device_messages(self):
+        serializer = VaPipecatFrameSerializer(_never_terminal)
+
+        self.assertIsNone(await serializer.deserialize('{"type":"wake"}'))
+        self.assertIsNone(await serializer.deserialize('{"type":"flush"}'))
+        self.assertIsInstance(await serializer.deserialize('{"type":"stop"}'), InterruptionWorkerFrame)
+
+    async def test_silence_is_only_sent_right_after_speech(self):
+        quiet, speech = self._audio(0), self._audio(4000)
+
+        self.assertIsNone(await self.serializer.serialize(quiet))
+        self.assertEqual(await self.serializer.serialize(speech), speech.audio)
+        self.assertEqual(await self.serializer.serialize(quiet), quiet.audio)
+
+        self.serializer._last_voiced_audio -= LIVE_SILENCE_HANGOVER_SECS + 0.1
+        self.assertIsNone(await self.serializer.serialize(quiet))
+
+    async def test_classic_sessions_send_silence_as_it_comes(self):
+        quiet = self._audio(0)
+
+        self.assertEqual(await VaPipecatFrameSerializer(_never_terminal).serialize(quiet), quiet.audio)
 
 
 if __name__ == "__main__":

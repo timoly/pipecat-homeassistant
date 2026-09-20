@@ -8,8 +8,9 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 ADDON_ROOT = Path(__file__).resolve().parents[1] / "addons" / "pipecat_assist"
 sys.path.insert(0, str(ADDON_ROOT))
@@ -28,6 +29,8 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema  # noqa: E40
 from pipecat.adapters.schemas.tools_schema import ToolsSchema  # noqa: E402
 from pipecat.processors.aggregators.llm_context import LLMContext  # noqa: E402
 from pipecat.services.openai.live.llm import OpenAILiveLLMService  # noqa: E402
+
+from app.va_pipecat import SatelliteConversationEndFrame, SatelliteWakeFrame  # noqa: E402
 
 
 def _openai_live_flow(**overrides) -> FlowConfig:
@@ -123,7 +126,7 @@ class OpenAILiveModelTests(unittest.TestCase):
         )
 
 
-class ESPHomeOpenAILiveGuardTests(unittest.TestCase):
+class ESPHomeOpenAILiveTests(unittest.TestCase):
     def test_only_live_flows_are_flagged(self):
         config = default_config_from_environment()
         realtime_flow = _openai_live_flow(model="gpt-realtime-2")
@@ -133,9 +136,17 @@ class ESPHomeOpenAILiveGuardTests(unittest.TestCase):
         self.assertFalse(main._flow_uses_openai_live(config, realtime_flow))
         self.assertFalse(main._flow_uses_openai_live(config, config.flows[0]))
 
-    def test_satellite_is_rejected_before_a_live_session_starts(self):
+    def test_satellite_transport_uses_live_sessions_only_for_live_flows(self):
+        config = default_config_from_environment()
+
+        live = main._transport_params(config, _openai_live_flow())["websocket"]()
+        gemini = main._transport_params(config, config.flows[0])["websocket"]()
+
+        self.assertTrue(live.serializer.live_sessions)
+        self.assertFalse(gemini.serializer.live_sessions)
+
+    def test_satellite_runs_live_pipelines(self):
         from fastapi.testclient import TestClient
-        from starlette.websockets import WebSocketDisconnect
 
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
@@ -145,23 +156,24 @@ class ESPHomeOpenAILiveGuardTests(unittest.TestCase):
             original_store = main.STORE
             main.STORE = store
             try:
-                with patch.object(main, "bot") as bot:
+                with patch.object(main, "bot", new=AsyncMock()) as bot:
                     client = TestClient(main.app)
                     url = f"/api/assist/esphome?token={config.satellite_shared_secret}&flow_id=openai-live"
                     with client.websocket_connect(url) as websocket:
                         hello = json.loads(websocket.receive_text())
-                        error = json.loads(websocket.receive_text())
-                        with self.assertRaises(WebSocketDisconnect) as closed:
-                            websocket.receive_text()
             finally:
                 main.STORE = original_store
 
-        bot.assert_not_called()
         self.assertEqual(hello["type"], "hello")
-        self.assertEqual(error["code"], "unsupported_pipeline")
-        self.assertFalse(error["recoverable"])
-        self.assertIn("gpt-live", base64.b64decode(error["message_b64"]).decode())
-        self.assertEqual(closed.exception.code, 4400)
+        runner_args = bot.await_args.args[0]
+        self.assertEqual(runner_args.body["flow_id"], "openai-live")
+        self.assertEqual(runner_args.body["transport"], "va-pipecat")
+
+    def test_finnish_goodbyes_end_the_conversation(self):
+        self.assertTrue(main._should_end_conversation("Kiitos, siinä kaikki."))
+        self.assertTrue(main._should_end_conversation("", "Näkemiin!"))
+        self.assertTrue(main._should_end_conversation("Hei hei"))
+        self.assertFalse(main._should_end_conversation("Sytytä työhuoneen spotit", "Selvä, sytytin ne."))
 
 
 class OpenAILiveSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -363,6 +375,148 @@ class OpenAILiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         commentary = [event for event in connections[1] if event["type"] == "session.commentary.append"]
         self.assertIn("cut off", commentary[0]["content"])
+
+
+class FakeLiveAPI:
+    """Speak enough of the Live API to start, feed, and close sessions."""
+
+    def __init__(self, start_delay: float = 0.3):
+        self.start_delay = start_delay
+        self.connections: list[list[dict]] = []
+        self.sockets = []
+        self.events: asyncio.Queue = asyncio.Queue()
+
+    async def handler(self, websocket):
+        from websockets.exceptions import ConnectionClosed
+
+        received: list[dict] = []
+        self.connections.append(received)
+        self.sockets.append(websocket)
+        index = len(self.connections) - 1
+        try:
+            async for raw in websocket:
+                event = json.loads(raw)
+                received.append(event)
+                await self.events.put((index, event))
+                if event["type"] == "session.start":
+                    await asyncio.sleep(self.start_delay)
+                    await websocket.send(json.dumps({"type": "session.started", "session": {"id": f"live_{index}"}}))
+                elif event["type"] == "session.close":
+                    await websocket.send(json.dumps({"type": "session.closed", "reason": "client_close"}))
+                    await websocket.close()
+                    return
+        except ConnectionClosed:
+            pass
+
+    async def next_event(self, event_type: str, timeout: float = 5.0) -> tuple[int, dict]:
+        while True:
+            index, event = await asyncio.wait_for(self.events.get(), timeout)
+            if event["type"] == event_type:
+                return index, event
+
+    async def send(self, index: int, payload: dict):
+        await self.sockets[index].send(json.dumps(payload))
+
+
+class SatelliteOpenAILiveTests(unittest.IsolatedAsyncioTestCase):
+    @asynccontextmanager
+    async def _satellite(self, context: LLMContext, api: FakeLiveAPI):
+        from pipecat.frames.frames import LLMContextFrame
+        from pipecat.pipeline.pipeline import Pipeline
+        from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+        from pipecat.workers.runner import WorkerRunner
+        from websockets.asyncio.server import serve
+
+        config = default_config_from_environment()
+        llm = main._openai_live_service(
+            api_key="test-key",
+            model="gpt-live-1",
+            flow=_openai_live_flow(),
+            integration=config.integration("openai"),
+            backend_model="gpt-5.4-mini",
+            satellite_config=config,
+        )
+        async with serve(api.handler, "127.0.0.1", 0) as server:
+            llm.base_url = f"ws://127.0.0.1:{next(iter(server.sockets)).getsockname()[1]}"
+            worker = PipelineWorker(Pipeline([llm]), params=PipelineParams(), idle_timeout_secs=None)
+            runner = WorkerRunner(handle_sigint=False)
+            await runner.add_workers(worker)
+            running = asyncio.create_task(runner.run())
+            # What run_bot queues when the satellite connects.
+            await worker.queue_frames([LLMContextFrame(context)])
+            try:
+                yield llm, worker
+            finally:
+                await worker.cancel()
+                await asyncio.wait_for(running, timeout=10)
+
+    @staticmethod
+    def _speech(frames: int) -> list:
+        from pipecat.frames.frames import InputAudioRawFrame
+
+        # 100 ms of 16 kHz PCM each, loud enough not to be silence.
+        return [
+            InputAudioRawFrame(audio=b"\x00\x10" * 1600, sample_rate=16000, num_channels=1)
+            for _ in range(frames)
+        ]
+
+    async def test_wake_opens_a_session_that_the_device_closes(self):
+        api = FakeLiveAPI()
+        context = LLMContext(
+            [
+                {"role": "user", "content": "Sytytä työhuoneen spotit"},
+                {"role": "assistant", "content": "Selvä."},
+            ]
+        )
+        async with self._satellite(context, api) as (llm, worker):
+            await asyncio.sleep(0.5)
+            self.assertEqual(api.connections, [])
+
+            # The device streams the request while the session is still starting.
+            await worker.queue_frames([SatelliteWakeFrame(), *self._speech(5)])
+            _, start = await api.next_event("session.start")
+            appended = bytearray()
+            while len(appended) < 0.8 * 5 * 4800:
+                _, event = await api.next_event("session.input_audio.append")
+                appended += base64.b64decode(event["audio"])
+
+            await worker.queue_frames([SatelliteConversationEndFrame(reason="microphone closed")])
+            await api.next_event("session.close")
+
+            await worker.queue_frames([SatelliteWakeFrame()])
+            restarted, restart = await api.next_event("session.start")
+
+        self.assertEqual([item["role"] for item in start["session"]["input"]], ["user", "assistant"])
+        self.assertEqual(restarted, 1)
+        self.assertEqual(len(restart["session"]["input"]), 2)
+
+    async def test_goodbye_closes_the_session(self):
+        api = FakeLiveAPI(start_delay=0)
+        async with self._satellite(LLMContext(), api) as (llm, worker):
+            await worker.queue_frames([SatelliteWakeFrame()])
+            index, _ = await api.next_event("session.start")
+            await asyncio.sleep(0.2)
+            await api.send(index, {"type": "session.input_transcript.delta", "delta": "Kiitos, siinä kaikki."})
+            await asyncio.sleep(0.1)
+            await api.send(index, {"type": "session.output_transcript.delta", "delta": "Hei hei!"})
+
+            await api.next_event("session.close")
+
+    async def test_silence_closes_the_session(self):
+        api = FakeLiveAPI(start_delay=0)
+        async with self._satellite(LLMContext(), api) as (llm, worker):
+            llm._idle_timeout_secs = 0.3
+            await worker.queue_frames([SatelliteWakeFrame()])
+            await api.next_event("session.start")
+
+            await api.next_event("session.close", timeout=4)
+
+    async def test_microphone_audio_opens_a_session_without_a_wake_message(self):
+        api = FakeLiveAPI(start_delay=0)
+        async with self._satellite(LLMContext(), api) as (llm, worker):
+            await worker.queue_frames(self._speech(1))
+
+            await api.next_event("session.start")
 
 
 if __name__ == "__main__":

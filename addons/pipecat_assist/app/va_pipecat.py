@@ -5,9 +5,12 @@ from __future__ import annotations
 import array
 import math
 import sys
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from loguru import logger
+from pipecat.audio.utils import is_silence
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
@@ -18,6 +21,7 @@ from pipecat.frames.frames import (
     OutputAudioRawFrame,
     OutputTransportMessageFrame,
     OutputTransportMessageUrgentFrame,
+    SystemFrame,
 )
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
@@ -28,10 +32,34 @@ INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
 CHANNELS = 1
 OUTPUT_PACKET_BYTES = 1920  # 40 ms of mono PCM16 at 24 kHz
+# Silence kept after speech in a live session, so pauses between words survive.
+LIVE_SILENCE_HANGOVER_SECS = 0.5
+
+
+@dataclass
+class SatelliteWakeFrame(SystemFrame):
+    """The satellite heard its wake word and is streaming the user's request."""
+
+
+@dataclass
+class SatelliteConversationEndFrame(SystemFrame):
+    """The satellite ended the conversation, so a per-conversation session can close.
+
+    Parameters:
+        reason: Why the conversation ended.
+    """
+
+    reason: str = ""
 
 
 class VaPipecatFrameSerializer(FrameSerializer):
-    """Serialize raw PCM and compact conversation events for ESPHome."""
+    """Serialize raw PCM and compact conversation events for ESPHome.
+
+    With ``live_sessions`` the model holds a session per conversation and
+    streams audio continuously, silence included: device wake, stop and flush
+    messages become conversation frames, and silence is not sent to the
+    device, which waits for its speaker to drain before opening a follow-up.
+    """
 
     def __init__(
         self,
@@ -41,6 +69,7 @@ class VaPipecatFrameSerializer(FrameSerializer):
         follow_up_open_delay_ms: int = 80,
         wake_open_delay_ms: int = 0,
         playback_prebuffer_ms: int = 300,
+        live_sessions: bool = False,
     ):
         super().__init__(
             params=FrameSerializer.InputParams(ignore_rtvi_messages=False),
@@ -55,8 +84,18 @@ class VaPipecatFrameSerializer(FrameSerializer):
             follow_up_open_delay_ms=follow_up_open_delay_ms,
             wake_open_delay_ms=wake_open_delay_ms,
             playback_prebuffer_ms=playback_prebuffer_ms,
+            live_sessions=live_sessions,
         )
+        self.live_sessions = live_sessions
+        self._last_voiced_audio = float("-inf")
         self._reset_audio_probe()
+
+    def _audible(self, audio: bytes) -> bool:
+        now = time.monotonic()
+        if not is_silence(audio):
+            self._last_voiced_audio = now
+            return True
+        return now - self._last_voiced_audio <= LIVE_SILENCE_HANGOVER_SECS
 
     def _reset_audio_probe(self) -> None:
         self._probe_samples = 0
@@ -103,6 +142,8 @@ class VaPipecatFrameSerializer(FrameSerializer):
 
     async def serialize(self, frame: Frame) -> str | bytes | None:
         if isinstance(frame, OutputAudioRawFrame):
+            if self.live_sessions and not self._audible(frame.audio):
+                return None
             return frame.audio
 
         if isinstance(frame, InterruptionFrame):
@@ -133,6 +174,12 @@ class VaPipecatFrameSerializer(FrameSerializer):
         action = self.protocol.client_action(data)
         if action == "wake":
             self._reset_audio_probe()
+            if self.live_sessions:
+                return SatelliteWakeFrame()
+        if self.live_sessions and action in {"stop", "flush"}:
+            # flush means the follow-up window or the no-speech watchdog closed the microphone.
+            reason = "stopped by the user" if action == "stop" else "microphone closed"
+            return SatelliteConversationEndFrame(reason=reason)
         if action in {"interrupt", "stop"}:
             return InterruptionWorkerFrame()
         return None
@@ -145,6 +192,7 @@ def websocket_transport_params(
     follow_up_open_delay_ms: int = 80,
     wake_open_delay_ms: int = 0,
     playback_prebuffer_ms: int = 300,
+    live_sessions: bool = False,
 ) -> FastAPIWebsocketParams:
     """Build the fixed PCM transport contract used by ESPHome satellites."""
 
@@ -164,6 +212,7 @@ def websocket_transport_params(
             follow_up_open_delay_ms=follow_up_open_delay_ms,
             wake_open_delay_ms=wake_open_delay_ms,
             playback_prebuffer_ms=playback_prebuffer_ms,
+            live_sessions=live_sessions,
         ),
         fixed_audio_packet_size=OUTPUT_PACKET_BYTES,
         allowed_origins=[],
