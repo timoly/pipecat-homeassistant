@@ -166,3 +166,45 @@ stateDiagram-v2
 The server phase is authoritative, but `speaking` remains visible until the
 device's PSRAM and downstream speaker buffers have actually drained. This
 prevents music resume or UI teardown while the final audio is still audible.
+
+## Home Assistant Voice: Preview Edition
+
+`examples/home-assistant-voice-pe.yaml` is a complete configuration for the
+Home Assistant Voice: Preview Edition. It is the official configuration with
+the wake word wired to Pipecat Assist instead of Home Assistant Assist.
+
+1. In **ESPHome Builder**, take control of the device (**Adopt**). Keep the
+   generated `api: encryption: key:` and Wi-Fi settings: you need them in
+   step 3.
+2. Copy `examples/home-assistant-voice-pe.yaml` over the generated
+   configuration.
+3. Put your encryption key back under `api:` and your Wi-Fi settings back
+   under `wifi:`, then install the firmware over the air.
+4. Start the Pipecat Assist add-on. It discovers the satellite through Home
+   Assistant and provisions the authenticated endpoint automatically.
+
+What stays as it is: the LED ring, the buttons, timers, the media player, and
+the built-in Home Assistant Assist pipeline, which the center button still
+starts. What changes: the wake word starts a Pipecat conversation, the
+satellite is provisioned through a native API action (`api:
+custom_services: true`), and the LED ring follows the phases the satellite
+reports.
+
+The microphone uses channel 0, the echo-cancelled output of the XMOS chip, so
+you can talk over the assistant. The assistant speaks through the
+announcement speaker, and music is ducked while it talks.
+
+The configuration is derived, not maintained by hand. Re-derive it when the
+official configuration changes:
+
+```bash
+python3 examples/derive_voice_pe_config.py > examples/home-assistant-voice-pe.yaml
+```
+
+To go back to the official firmware, use the
+[web installer](https://esphome.github.io/home-assistant-voice-pe/) over USB-C
+in Chrome or Edge. It reinstalls the stock firmware, after which Home
+Assistant adopts the device again as a standard voice satellite.
+
+OpenAI Live (`gpt-live-1`) pipelines need add-on 0.1.85 or later, which holds
+a Live session only while a conversation runs.

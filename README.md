@@ -322,6 +322,14 @@ created. See [the component reference](components/va_pipecat/README.md) and
 [architecture notes](docs/architecture/esphome-satellite.md) for the full
 configuration and conversation lifecycle.
 
+For the **Home Assistant Voice: Preview Edition** there is a ready
+configuration in
+[`components/va_pipecat/examples/home-assistant-voice-pe.yaml`](components/va_pipecat/examples/home-assistant-voice-pe.yaml).
+It is the official configuration with the wake word wired to Pipecat Assist,
+so the LED ring, buttons, timers, and media player keep working, and the
+official firmware can be restored with the
+[web installer](https://esphome.github.io/home-assistant-voice-pe/).
+
 Standalone `pipecat-esp32` clients remain supported through the SmallWebRTC
 `/api/offer` endpoint.
 
