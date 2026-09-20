@@ -248,8 +248,9 @@ and Lovelace calls end after five minutes without speech. ESPHome `va_pipecat`
 satellites keep their connection open from boot, so for them the add-on opens
 a Live session per conversation: on the wake word (or when the microphone
 starts streaming) and until the follow-up window runs out, the user stops the
-conversation, the assistant says goodbye, or nothing is said for the
-follow-up window plus 15 seconds. Microphone audio captured while the session
+conversation, the assistant says goodbye, nothing is said for the follow-up
+window plus 15 seconds, the assistant has not answered for a minute although
+it keeps hearing speech, or the conversation reaches three minutes. Microphone audio captured while the session
 starts is sent once it is ready. Every second of the follow-up window is
 billed, so consider lowering **Runtime > ESPHome satellite > Follow-up listening (ms)**
 for OpenAI Live pipelines. Standalone `pipecat-esp32` clients use the same

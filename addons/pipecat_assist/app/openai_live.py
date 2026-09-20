@@ -40,7 +40,9 @@ CAPTION_MAX_CHARS = 200
 # Satellite audio kept while a session starts; the rest of the request streams in after it.
 SATELLITE_AUDIO_BACKLOG_SECS = 10
 # Backstop for a satellite that never ends its conversation.
-SATELLITE_MAX_CONVERSATION_SECS = 600
+SATELLITE_MAX_CONVERSATION_SECS = 180
+# A model that hears speech but never answers is stuck, so stop paying for it.
+SATELLITE_SILENT_REPLY_SECS = 60
 # Trailing microphone audio after a conversation ends must not reopen it.
 SATELLITE_REOPEN_GRACE_SECS = 2.0
 
@@ -230,8 +232,9 @@ class SatelliteOpenAILiveLLMService(ResilientOpenAILiveLLMService):
     the device wakes (or starts streaming its microphone without a wake
     message) and closes when the conversation ends: the device's follow-up
     window runs out, the user stops it, the assistant says goodbye, nothing
-    has been said for ``idle_timeout_secs``, or it reaches
-    ``SATELLITE_MAX_CONVERSATION_SECS``.
+    has been said for ``idle_timeout_secs``, the assistant has not answered
+    for ``SATELLITE_SILENT_REPLY_SECS`` although it keeps hearing speech, or
+    the conversation reaches ``SATELLITE_MAX_CONVERSATION_SECS``.
 
     Microphone audio that arrives while the session starts is kept and sent
     once it is ready. A new session starts from the last ``history_messages``
@@ -257,6 +260,8 @@ class SatelliteOpenAILiveLLMService(ResilientOpenAILiveLLMService):
         self._conversation_lock = asyncio.Lock()
         self._conversation_started_at = 0.0
         self._last_activity = 0.0
+        self._last_reply = 0.0
+        self._silent_reply_secs = SATELLITE_SILENT_REPLY_SECS
         self._last_conversation_end = time.monotonic()
         self._history_is_fresh = False
         self._reopen_blocked_until = 0.0
@@ -319,6 +324,7 @@ class SatelliteOpenAILiveLLMService(ResilientOpenAILiveLLMService):
             self._conversation_active = True
             self._conversation_started_at = now
             self._last_activity = now
+            self._last_reply = now
             self._history_is_fresh = now - self._last_conversation_end <= self._history_reuse_secs
             logger.info("Satellite conversation started by {}; opening an OpenAI Live session", trigger)
             await self._connect()
@@ -356,6 +362,9 @@ class SatelliteOpenAILiveLLMService(ResilientOpenAILiveLLMService):
                 await self._end_conversation("maximum conversation length")
             elif now - self._last_activity > self._idle_timeout_secs:
                 await self._end_conversation("nothing said")
+            elif now - self._last_reply > self._silent_reply_secs:
+                # Speech keeps arriving, but the model is not answering it.
+                await self._end_conversation("no reply from the model")
 
     async def _send_user_audio(self, frame: InputAudioRawFrame):
         if self._conversation_active and (not self._session_started or self._sending_backlog):
@@ -392,5 +401,7 @@ class SatelliteOpenAILiveLLMService(ResilientOpenAILiveLLMService):
         self._last_activity = time.monotonic()
         if role == "user":
             self._last_user_turn_text = text
-        elif self._conversation_active and self._should_end_conversation(self._last_user_turn_text, text):
+            return
+        self._last_reply = self._last_activity
+        if self._conversation_active and self._should_end_conversation(self._last_user_turn_text, text):
             self.create_task(self._end_conversation("goodbye"), "satellite-live-end")

@@ -8,7 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -510,6 +510,27 @@ class SatelliteOpenAILiveTests(unittest.IsolatedAsyncioTestCase):
             await api.next_event("session.start")
 
             await api.next_event("session.close", timeout=4)
+
+    async def test_a_model_that_never_answers_ends_the_conversation(self):
+        api = FakeLiveAPI(start_delay=0)
+        async with self._satellite(LLMContext(), api) as (llm, worker):
+            # Speech keeps the conversation busy, so only the reply guard can end it.
+            llm._idle_timeout_secs = 30
+            llm._silent_reply_secs = 0.5
+            await worker.queue_frames([SatelliteWakeFrame()])
+            index, _ = await api.next_event("session.start")
+
+            async def keep_talking():
+                with suppress(Exception):  # The socket closes under us on purpose.
+                    while True:
+                        await api.send(index, {"type": "session.input_transcript.delta", "delta": "soita musiikkia "})
+                        await asyncio.sleep(0.2)
+
+            talking = asyncio.create_task(keep_talking())
+            try:
+                await api.next_event("session.close", timeout=5)
+            finally:
+                talking.cancel()
 
     async def test_microphone_audio_opens_a_session_without_a_wake_message(self):
         api = FakeLiveAPI(start_delay=0)

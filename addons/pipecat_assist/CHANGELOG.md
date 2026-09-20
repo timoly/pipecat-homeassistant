@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.86
+
+- End a satellite conversation when the model keeps hearing speech but has not
+  answered for a minute, and cap a conversation at three minutes instead of
+  ten. A model that mistakes room noise for speech never stops listening, and
+  the Live API bills every minute of it.
+
 ## 0.1.85
 
 - Support OpenAI Live on ESPHome `va_pipecat` satellites such as the Home
