@@ -69,6 +69,12 @@ CHIME_TAIL_MS = 60
 # chime. A short one plays it at once and costs a Pi 3 nothing measurable.
 PLAYBACK_PERIOD_US = 20000
 PLAYBACK_BUFFER_US = 400000
+# Left alone, aplay asks ALSA to start only once the whole buffer is full, so a
+# sound shorter than the buffer waits for unrelated audio to push it out — or
+# for the end of the stream, which is why the same bytes play from a pipe that
+# closes. This starts playback as soon as there is anything to play; the jitter
+# buffer in this client, not the one in ALSA, is what covers a late packet.
+PLAYBACK_START_DELAY_US = 1
 
 logger = logging.getLogger("satellite")
 
@@ -256,6 +262,7 @@ class AlsaPlayback:
             "1",
             f"--period-time={PLAYBACK_PERIOD_US}",
             f"--buffer-time={PLAYBACK_BUFFER_US}",
+            f"--start-delay={PLAYBACK_START_DELAY_US}",
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
