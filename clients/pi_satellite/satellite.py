@@ -100,8 +100,17 @@ class Config:
     def load(cls, path: Path | None) -> Config:
         values: dict[str, object] = {}
         if path is not None:
-            with path.open("rb") as handle:
-                values = tomllib.load(handle)
+            try:
+                with path.open("rb") as handle:
+                    values = tomllib.load(handle)
+            except tomllib.TOMLDecodeError as error:
+                # Appending a setting that is already in the file is the common
+                # way to get here, and TOML rejects the duplicate rather than
+                # taking the last one. A traceback from a service that restarts
+                # on failure says none of that.
+                raise SystemExit(f"{path} is not valid TOML: {error}") from error
+            except OSError as error:
+                raise SystemExit(f"Cannot read {path}: {error}") from error
         url = str(os.environ.get("PIPECAT_SATELLITE_URL") or values.get("url") or "")
         if not url:
             raise SystemExit(

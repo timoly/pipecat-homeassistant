@@ -26,6 +26,14 @@ cp config.example.toml ~/.config/pipecat-satellite.toml
 chmod 600 ~/.config/pipecat-satellite.toml
 ```
 
+Change a setting by editing the line that is already there. TOML rejects a key
+that appears twice, so appending one that the file already has stops the
+satellite from starting at all — check a file you are unsure of with:
+
+```bash
+python3 -c "import tomllib,pathlib; tomllib.loads(pathlib.Path.home().joinpath('.config/pipecat-satellite.toml').read_text()); print('ok')"
+```
+
 The websocket URL is on the add-on's **Runtime** tab under *ESPHome satellite*.
 It contains the shared secret, so it belongs in that file and nowhere else.
 
