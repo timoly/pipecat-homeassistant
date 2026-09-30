@@ -128,6 +128,46 @@ def _commands(*queued: str):
     return next_command
 
 
+class FakeStderr:
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    async def readline(self) -> bytes:
+        return self._lines.pop(0) if self._lines else b""
+
+
+class FakeProcess:
+    def __init__(self, lines=()):
+        self.stderr = FakeStderr(lines)
+        self.returncode = 1
+
+
+@unittest.skipUnless(satellite, "The Pi satellite client is not available here")
+class AlsaMessageTests(unittest.IsolatedAsyncioTestCase):
+    """What arecord and aplay say has to be read, or their pipe fills up."""
+
+    async def test_helper_output_is_kept_and_explains_a_failure(self):
+        from collections import deque
+
+        seen = deque(maxlen=5)
+        process = FakeProcess([b"overrun!!! (at least 12.345 ms long)\n", b"\n"])
+
+        await satellite._log_stderr(process, "arecord", seen)
+
+        self.assertEqual(list(seen), ["overrun!!! (at least 12.345 ms long)"])
+        self.assertIn("overrun", satellite._failure(process, seen))
+
+    async def test_a_silent_helper_is_explained_by_its_exit_code(self):
+        from collections import deque
+
+        seen = deque(maxlen=5)
+        process = FakeProcess()
+
+        await satellite._log_stderr(process, "aplay", seen)
+
+        self.assertEqual(satellite._failure(process, seen), "exit code 1")
+
+
 @unittest.skipUnless(satellite, "The Pi satellite client is not available here")
 class SessionTests(unittest.IsolatedAsyncioTestCase):
     def _session(

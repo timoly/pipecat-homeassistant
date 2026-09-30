@@ -26,6 +26,7 @@ import os
 import sys
 import time
 import tomllib
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -192,6 +193,8 @@ class AlsaCapture:
         self.device = device
         self.chunk_bytes = INPUT_SAMPLE_RATE * 2 * CHUNK_MS // 1000
         self._process: asyncio.subprocess.Process | None = None
+        self._messages: deque[str] = deque(maxlen=5)
+        self._drain: asyncio.Task | None = None
 
     async def start(self) -> None:
         self._process = await asyncio.create_subprocess_exec(
@@ -210,6 +213,10 @@ class AlsaCapture:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._messages.clear()
+        self._drain = asyncio.create_task(
+            _log_stderr(self._process, "arecord", self._messages)
+        )
         logger.info("Capturing from %s at %d Hz", self.device, INPUT_SAMPLE_RATE)
 
     async def read(self) -> bytes:
@@ -221,7 +228,7 @@ class AlsaCapture:
         except asyncio.IncompleteReadError as error:
             # A wrong device name is the common case here, and arecord explains
             # it on stderr — the reason belongs in the log, not just the exit code.
-            raise RuntimeError(f"arecord stopped: {await _failure(process)}") from error
+            raise RuntimeError(f"arecord stopped: {_failure(process, self._messages)}") from error
 
     @property
     def running(self) -> bool:
@@ -233,11 +240,13 @@ class AlsaCapture:
         if self.running:
             return
         if self._process is not None:
-            logger.warning("Capture stopped: %s", await _failure(self._process))
+            logger.warning("Capture stopped: %s", _failure(self._process, self._messages))
             await self.stop()
         await self.start()
 
     async def stop(self) -> None:
+        await _cancel(self._drain)
+        self._drain = None
         await _terminate(self._process)
         self._process = None
 
@@ -249,6 +258,8 @@ class AlsaPlayback:
         self.device = device
         self.prebuffer_ms = prebuffer_ms
         self._process: asyncio.subprocess.Process | None = None
+        self._messages: deque[str] = deque(maxlen=5)
+        self._drain: asyncio.Task | None = None
         self._buffer = bytearray()
         self._primed = False
         self._prime_started = 0.0
@@ -277,6 +288,8 @@ class AlsaPlayback:
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._messages.clear()
+        self._drain = asyncio.create_task(_log_stderr(self._process, "aplay", self._messages))
         logger.info("Playing to %s at %d Hz", self.device, OUTPUT_SAMPLE_RATE)
 
     async def write(self, audio: bytes) -> None:
@@ -304,7 +317,7 @@ class AlsaPlayback:
             process.stdin.write(audio)
             await process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError):
-            logger.warning("Playback stopped: %s", await _failure(process))
+            logger.warning("Playback stopped: %s", _failure(process, self._messages))
             await self.reset()
 
     async def play_now(self, audio: bytes) -> None:
@@ -329,24 +342,58 @@ class AlsaPlayback:
         await self.start()
 
     async def stop(self) -> None:
+        await _cancel(self._drain)
+        self._drain = None
         await _terminate(self._process)
         self._process = None
 
 
-async def _failure(process: asyncio.subprocess.Process | None) -> str:
+async def _log_stderr(process: asyncio.subprocess.Process, label: str, seen: deque) -> None:
+    """Report what an ALSA helper says, and keep its pipe from filling up.
+
+    aplay and arecord complain about overruns and underruns on stderr. Nobody
+    reading that pipe means the warnings are invisible and, once 64 KiB of them
+    have piled up, that the helper blocks writing to it — audio stops while it
+    waits, which looks like anything but a logging problem.
+    """
+
+    if process.stderr is None:
+        return
+    logged_at = 0.0
+    held = 0
+    while True:
+        line = await process.stderr.readline()
+        if not line:
+            return
+        message = line.decode("utf-8", "replace").strip()
+        if not message:
+            continue
+        seen.append(message)
+        now = time.monotonic()
+        if now - logged_at < 1.0:
+            held += 1
+            continue
+        suffix = f" (and {held} more)" if held else ""
+        logger.warning("%s: %s%s", label, message, suffix)
+        logged_at, held = now, 0
+
+
+def _failure(process: asyncio.subprocess.Process | None, seen: deque) -> str:
     """Explain why an ALSA helper stopped, in its own words when it has any."""
 
+    if seen:
+        return "; ".join(seen)
     if process is None:
         return "no process"
-    if process.stderr is not None:
-        with contextlib.suppress(Exception):
-            # Bounded, because a helper that closed its pipes without exiting
-            # would otherwise keep this read waiting for an EOF that never comes.
-            raw = await asyncio.wait_for(process.stderr.read(), timeout=1)
-            message = raw.decode("utf-8", "replace").strip()
-            if message:
-                return message
     return f"exit code {process.returncode}"
+
+
+async def _cancel(task: asyncio.Task | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 async def _terminate(process: asyncio.subprocess.Process | None) -> None:
