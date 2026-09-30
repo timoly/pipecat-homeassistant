@@ -199,6 +199,42 @@ class SatelliteClientTests(unittest.TestCase):
         self.assertEqual(actions, [DropPlayback("barge_in")])
         self.assertTrue(self.client.active)
 
+    def test_a_reply_that_ends_without_a_phase_still_closes(self):
+        """The bug this guards: audio used to cancel the window outright.
+
+        A live server reports a reply finished and then speaks again, so the
+        window was armed and cancelled repeatedly; when the last thing it sent
+        was audio, nothing was left to close the conversation and the session
+        stayed open, and billed, indefinitely.
+        """
+
+        self.client.wake(0.0)
+        self.client.on_server_text(_phase("listening", follow_up=True), 5.0)
+        self.client.tick(5.2)
+
+        for moment in (6.0, 10.0, 20.0, 30.0):
+            self.client.on_server_audio(b"\x01\x02" * 8, moment)
+            self.assertEqual(_sent(self.client.tick(moment)), [])
+
+        # Thirty seconds of speech, then the follow-up window from its end.
+        self.assertEqual(_sent(self.client.tick(59.0)), [])
+        self.assertEqual(_sent(self.client.tick(60.5)), ["flush"])
+
+    def test_a_conversation_cannot_be_kept_open_for_ever(self):
+        client = SatelliteClient(max_conversation_secs=20.0)
+        client.wake(0.0)
+
+        # A server that keeps reopening the window pushes every other limit
+        # forward, so the cap is the one thing it cannot move.
+        for moment in range(1, 20):
+            client.on_server_text(_phase("listening", follow_up=True), float(moment))
+            client.tick(float(moment) + 0.2)
+
+        actions = client.tick(20.5)
+
+        self.assertEqual(_sent(actions), ["stop"])
+        self.assertFalse(client.active)
+
     def test_an_error_is_decoded_rather_than_dropped(self):
         payload = VaPipecatProtocol(lambda *_: False).error_message("boom", "model went away")
 

@@ -23,6 +23,11 @@ OUTPUT_SAMPLE_RATE = 24000
 # The ESPHome satellite gives up seven seconds after a wake word when the
 # server never reports hearing anyone, and so does this client.
 NO_SPEECH_SECS = 7.0
+# A hard cap on one conversation, matching the add-on's own. Every other limit
+# here is armed by something the server says, and a server that keeps reporting
+# a reply as finished and then speaking again pushes those limits forward
+# indefinitely — with a live model, that is billed for as long as it lasts.
+MAX_CONVERSATION_SECS = 180.0
 DEFAULT_FOLLOW_UP_MS = 30000
 DEFAULT_FOLLOW_UP_OPEN_DELAY_MS = 80
 DEFAULT_WAKE_OPEN_DELAY_MS = 0
@@ -118,9 +123,16 @@ class SatelliteClient:
     caller should perform, so the clock and the side effects both stay outside.
     """
 
-    def __init__(self, *, barge_in: bool = True, no_speech_secs: float = NO_SPEECH_SECS):
+    def __init__(
+        self,
+        *,
+        barge_in: bool = True,
+        no_speech_secs: float = NO_SPEECH_SECS,
+        max_conversation_secs: float = MAX_CONVERSATION_SECS,
+    ):
         self.barge_in = barge_in
         self.no_speech_secs = no_speech_secs
+        self.max_conversation_secs = max_conversation_secs
         self.phase = "idle"
         self.active = False
         self.streaming_microphone = False
@@ -133,6 +145,7 @@ class SatelliteClient:
         self._window_secs = 0.0
         self._window_deadline: float | None = None
         self._window_reason = ""
+        self._conversation_deadline: float | None = None
         self._request_follow_up = False
 
     # -- local events ----------------------------------------------------
@@ -151,6 +164,7 @@ class SatelliteClient:
         self.active = True
         self.phase = "listening"
         self._request_follow_up = False
+        self._conversation_deadline = now + self.max_conversation_secs
         return [
             _control("wake"),
             PhaseChanged("listening"),
@@ -184,6 +198,10 @@ class SatelliteClient:
             # rather than left open: `flush` lets the add-on close the session.
             actions.append(_control("flush"))
             actions.extend(self._finish(now, self._window_reason or "no speech"))
+        elif self._conversation_deadline is not None and now >= self._conversation_deadline:
+            actions.append(_control("stop"))
+            actions.append(DropPlayback("conversation reached its maximum length"))
+            actions.extend(self._finish(now, "maximum length"))
         return actions
 
     # -- server events ---------------------------------------------------
@@ -231,7 +249,12 @@ class SatelliteClient:
             self.phase = "speaking"
             actions.append(PhaseChanged("speaking"))
             actions.extend(self._microphone_for_reply())
-        self._window_deadline = None
+        if self._window_deadline is not None:
+            # Audio pushes the window forward rather than cancelling it. A reply
+            # must not be cut off mid-sentence, but a window that is cancelled
+            # can only be armed again by a phase the server may never send, and
+            # the conversation then stays open — and billed — indefinitely.
+            self._window_deadline = now + self._window_secs
         actions.append(Play(audio))
         return actions
 
@@ -358,6 +381,7 @@ class SatelliteClient:
         self._mic_open_at = None
         self._window_deadline = None
         self._window_reason = ""
+        self._conversation_deadline: float | None = None
         self._request_follow_up = False
         actions: list[Action] = []
         if self.streaming_microphone:

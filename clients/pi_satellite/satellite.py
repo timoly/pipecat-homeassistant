@@ -88,6 +88,7 @@ class Config:
     playback_device: str = "default"
     capture_gain: float = 1.0
     barge_in: bool = True
+    max_conversation_secs: float = 180.0
     wake_chime: bool = True
     wake_word_model: str = ""
     wake_word_gain: float = 1.0
@@ -113,6 +114,7 @@ class Config:
             playback_device=str(values.get("playback_device", "default")),
             capture_gain=float(values.get("capture_gain", 1.0)),
             barge_in=bool(values.get("barge_in", True)),
+            max_conversation_secs=float(values.get("max_conversation_secs", 180.0)),
             wake_chime=bool(values.get("wake_chime", True)),
             wake_word_model=str(values.get("wake_word_model", "")),
             wake_word_gain=float(values.get("wake_word_gain", 1.0)),
@@ -366,7 +368,10 @@ class Session:
         self.connection = connection
         self.capture = capture
         self.wake_word = wake_word
-        self.client = SatelliteClient(barge_in=config.barge_in)
+        self.client = SatelliteClient(
+            barge_in=config.barge_in,
+            max_conversation_secs=config.max_conversation_secs,
+        )
         self.playback = AlsaPlayback(config.playback_device)
         # Conversations start from the console today and from a wake word or a
         # button later; the protocol cannot tell the difference.

@@ -29,6 +29,12 @@ barge_in = true
 # audio — so this is the only sign that the wake word landed.
 wake_chime = true
 
+# The longest one conversation may run before the satellite stops it. Every
+# other limit is armed by something the add-on says, and a live model that keeps
+# reporting a reply finished and then speaking again pushes those forward; this
+# is the one it cannot move, so it is what bounds the worst case on the bill.
+max_conversation_secs = 180.0
+
 log_level = "INFO"
 
 # Wake word. Empty means the keyboard starts conversations.
