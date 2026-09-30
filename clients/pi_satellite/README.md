@@ -171,7 +171,18 @@ That last line is what keeps it running with nobody logged in. Afterwards:
 
 ```bash
 systemctl --user status pipecat-satellite
-journalctl --user -u pipecat-satellite -f
+journalctl --user-unit=pipecat-satellite -f
+```
+
+`--user-unit=` rather than `--user -u`: Raspberry Pi OS keeps the journal in
+memory and does not split it per user, so the second form reports that no
+journal files were found. To keep logs across reboots, create the directory the
+journal becomes persistent in:
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
 ```
 
 After a `git pull` that changes `satellite.py`, restart it:

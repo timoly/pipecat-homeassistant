@@ -9,7 +9,7 @@
 # The last line is what makes it run without anyone logged in. Then:
 #
 #   systemctl --user status pipecat-satellite
-#   journalctl --user -u pipecat-satellite -f
+#   journalctl --user-unit=pipecat-satellite -f
 #
 # A user service keeps the satellite as the user who owns the audio device and
 # the configuration in ~/.config, with no root anywhere. It needs a wake word to
