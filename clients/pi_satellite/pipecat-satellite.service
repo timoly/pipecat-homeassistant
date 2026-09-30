@@ -1,0 +1,23 @@
+# Run the satellite at boot:
+#
+#   sudo cp pipecat-satellite.service /etc/systemd/system/
+#   sudo systemctl enable --now pipecat-satellite
+#   journalctl -u pipecat-satellite -f
+#
+# There is no console under systemd, so this only makes sense once a wake word
+# or a button calls wake(); until then run satellite.py by hand.
+[Unit]
+Description=Pipecat Assist voice satellite
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=%i
+ExecStart=/home/%i/pipecat-satellite/.venv/bin/python /home/%i/pipecat-satellite/satellite.py
+Restart=always
+RestartSec=5
+# A dropped USB audio device should not spin the restart counter into failure.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

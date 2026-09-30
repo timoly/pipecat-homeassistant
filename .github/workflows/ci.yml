@@ -30,6 +30,9 @@ jobs:
           python -m unittest \
             tests.test_va_pipecat_protocol \
             tests.test_esphome_provisioner \
+            tests.test_pi_satellite_protocol \
+            tests.test_pi_satellite_session \
+            tests.test_pi_satellite_wake_word \
             tests.test_versions \
             -v
 

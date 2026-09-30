@@ -1,0 +1,146 @@
+# Raspberry Pi voice satellite
+
+A Linux satellite for the Pipecat Assist add-on. It speaks the same
+`va-pipecat` protocol as the ESPHome component in `components/va_pipecat`, so
+the add-on treats it exactly like a Voice PE: raw PCM16 up at 16 kHz, down at
+24 kHz, compact JSON for control, one OpenAI Live session per conversation.
+
+Tested target: Raspberry Pi 3 A+ with Raspberry Pi OS Lite and an Anker
+PowerConf USB speakerphone. Audio goes through `arecord` and `aplay`, so talking
+to the add-on needs nothing but `websockets`; a wake word is optional and brings
+openWakeWord with it.
+
+## Install
+
+```bash
+sudo apt update && sudo apt install -y python3-venv alsa-utils
+mkdir -p ~/pipecat-satellite && cd ~/pipecat-satellite
+python3 -m venv .venv && .venv/bin/pip install websockets
+```
+
+Copy `satellite.py`, `satellite_protocol.py` and `config.example.toml` onto the
+Pi, then write your own configuration:
+
+```bash
+cp config.example.toml ~/.config/pipecat-satellite.toml
+chmod 600 ~/.config/pipecat-satellite.toml
+```
+
+The websocket URL is on the add-on's **Runtime** tab under *ESPHome satellite*.
+It contains the shared secret, so it belongs in that file and nowhere else.
+
+Find the ALSA device names — never the card numbers, which move between boots:
+
+```bash
+arecord -l && aplay -l
+```
+
+A USB speakerphone shows up as something like `card 2: PowerConf`, which is
+`plughw:CARD=PowerConf` in the configuration.
+
+## Run
+
+```bash
+~/pipecat-satellite/.venv/bin/python ~/pipecat-satellite/satellite.py
+```
+
+Press Enter to start talking, `s` to stop the conversation, `q` to quit.
+Transcripts print as they arrive. This keyboard control exists so the audio
+chain can be verified before a wake word is added; the protocol does not care
+what woke the satellite, so a wake word or a button will call the same
+`wake()`.
+
+## Wake word
+
+Without one, conversations start from the keyboard. To use one:
+
+```bash
+.venv/bin/pip install pyopen-wakeword
+```
+
+Then set `wake_word_model` and restart. The built-in phrases are `okay_nabu`,
+`hey_jarvis`, `hey_mycroft`, `alexa` and `hey_rhasspy`. **`okay_nabu` is the one
+a Home Assistant Voice PE answers to**, so a house with both kinds of satellite
+keeps a single wake word.
+
+`pyopen-wakeword` is Rhasspy's openWakeWord, the one Home Assistant's own wake
+word add-on uses. It carries its own compiled TensorFlow Lite library and its
+models, so there is no ONNX or TFLite runtime to find for the Pi. Its wheels are
+built for `aarch64`, so a 64-bit Raspberry Pi OS is required — check with
+`uname -m`.
+
+Tune `wake_word_threshold` from the log: raise it if the satellite wakes on its
+own, lower it if it misses you, and run with `log_level = "DEBUG"` to see the
+scores that were nearly accepted.
+
+**A phrase of your own**, for example a Finnish one, means training a model.
+openWakeWord's training notebook generates thousands of synthetic samples with
+Piper text-to-speech, which has Finnish voices, and produces a `.tflite` file
+that goes straight into `wake_word_model`. Two things are worth knowing before
+starting: short phrases false-trigger much more often, so three syllables is
+about the floor, and a model trained here does not run on a Voice PE — ESP32
+uses microWakeWord, a separate pipeline.
+
+`wake_word.py` only needs a function that scores a 10 ms frame, so another
+engine can replace this one without touching the rest.
+
+## Tuning
+
+**Microphone level.** Speakerphones vary wildly in how hot their USB capture
+is, and ALSA may have no gain left to give:
+
+```bash
+amixer -c PowerConf                     # is `Mic` already at 100%?
+arecord -D plughw:CARD=PowerConf -f S16_LE -r 16000 -c 1 -V mono -d 15 /dev/null
+```
+
+If the meter sits near a few percent while you speak from a couple of metres,
+raise `capture_gain`. The add-on logs what it actually receives once per second
+as `ESPHome audio ingress window=... peak=... rms=...`; aim for a peak of
+3000–10000 when speaking normally. The Anker PowerConf needs about `4.0`.
+
+**Barge-in.** `barge_in = true` keeps the microphone open while the assistant
+speaks, so you can interrupt it. That only works when the speakerphone cancels
+its own echo; otherwise the assistant hears itself and interrupts itself. Test
+it before trusting it:
+
+```bash
+arecord -D plughw:CARD=PowerConf -f S16_LE -r 16000 -c 1 -d 8 /tmp/echo.wav & \
+  sleep 1; aplay -D plughw:CARD=PowerConf /tmp/some-speech.wav; wait
+```
+
+If the recording contains the playback at full volume, set `barge_in = false`.
+
+**Playback volume** is an ALSA control on the device, so the same mixer applies:
+
+```bash
+amixer -c PowerConf sset "PCM",0 80%
+```
+
+## Cost
+
+The add-on opens one Live session per conversation and bills by the minute
+while it is open, so this client reports every window that closes without
+speech (`flush`) and every explicit stop (`stop`). It also respects the
+follow-up window the server advertises in its `hello`. Lowering *Follow-up
+listening (ms)* in the add-on to around 8000 is the single most effective
+saving if the satellite sits in a room with background noise.
+
+## Running at boot
+
+`pipecat-satellite.service` is a systemd unit for later. There is no console
+under systemd, so it is only useful once a wake word or a button starts
+conversations — until then, run `satellite.py` from a shell.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `satellite_protocol.py` | The conversation state machine: no audio, no sockets, fully testable |
+| `satellite.py` | ALSA capture and playback, the websocket, the keyboard |
+| `config.example.toml` | Template for `~/.config/pipecat-satellite.toml` |
+| `pipecat-satellite.service` | systemd unit for unattended operation |
+
+`tests/test_pi_satellite_protocol.py` in the repository root runs the state
+machine against the add-on's own server-side protocol, so a change that breaks
+the contract fails without any hardware.

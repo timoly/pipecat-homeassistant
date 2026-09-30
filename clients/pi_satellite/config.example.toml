@@ -1,0 +1,38 @@
+# Pipecat Assist satellite, running on a Raspberry Pi with a USB speakerphone.
+#
+#   cp config.example.toml ~/.config/pipecat-satellite.toml
+#   chmod 600 ~/.config/pipecat-satellite.toml
+#
+# The URL comes from the add-on's Runtime tab, under "ESPHome satellite". It
+# carries the shared secret, so keep this file private and out of any commit.
+url = "ws://homeassistant.local:7860/api/assist/esphome?token=CHANGE_ME&flow_id=default"
+
+# ALSA device names. Prefer CARD= over a number: card indexes move between boots.
+# `arecord -l` and `aplay -l` list what this machine has.
+capture_device = "plughw:CARD=PowerConf"
+playback_device = "plughw:CARD=PowerConf"
+
+# Software gain on captured audio. The Anker PowerConf peaks around 5% of full
+# scale at two metres with its own mixer already at 100%, and 4.0 brings that to
+# a level the model hears comfortably. Watch the add-on log for
+# "ESPHome audio ingress" lines and aim for a peak of 3000-10000.
+capture_gain = 4.0
+
+# Keep the microphone open while the assistant speaks, so it can be interrupted.
+# Only leave this on when the speakerphone cancels its own echo well — otherwise
+# the assistant hears itself and interrupts itself.
+barge_in = true
+
+log_level = "INFO"
+
+# Wake word. Empty means the keyboard starts conversations.
+#   pip install pyopen-wakeword
+# Built-in phrases: okay_nabu, hey_jarvis, hey_mycroft, alexa, hey_rhasspy.
+# "okay_nabu" is what a Home Assistant Voice PE answers to, so a house with both
+# keeps one wake word. A path to a .tflite file uses a model of your own instead.
+wake_word_model = ""
+# Raise this if the satellite wakes on its own, lower it if it misses you. Run
+# with log_level = "DEBUG" to see the scores it almost accepted.
+wake_word_threshold = 0.5
+# Seconds of deafness after a detection, so one word cannot wake it twice.
+wake_word_cooldown_secs = 2.0
