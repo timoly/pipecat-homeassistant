@@ -21,6 +21,7 @@ import array
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import sys
 import time
@@ -53,6 +54,14 @@ TICK_SECS = 0.025
 PLAYBACK_GAP_SECS = 0.4
 RECONNECT_MIN_SECS = 1.0
 RECONNECT_MAX_SECS = 30.0
+# A satellite says nothing when it wakes: the add-on suppresses the greeting
+# for a live session, because the user spoke first and every second of an
+# answer nobody asked for is billed. A local chime is the acknowledgement, the
+# way a Voice PE lights its ring, and it costs nothing.
+CHIME_TONES = (880, 1175)
+CHIME_TONE_MS = 70
+CHIME_FADE_MS = 5
+CHIME_LEVEL = 0.2
 
 logger = logging.getLogger("satellite")
 
@@ -66,6 +75,7 @@ class Config:
     playback_device: str = "default"
     capture_gain: float = 1.0
     barge_in: bool = True
+    wake_chime: bool = True
     wake_word_model: str = ""
     wake_word_gain: float = 1.0
     wake_word_threshold: float = 0.5
@@ -90,6 +100,7 @@ class Config:
             playback_device=str(values.get("playback_device", "default")),
             capture_gain=float(values.get("capture_gain", 1.0)),
             barge_in=bool(values.get("barge_in", True)),
+            wake_chime=bool(values.get("wake_chime", True)),
             wake_word_model=str(values.get("wake_word_model", "")),
             wake_word_gain=float(values.get("wake_word_gain", 1.0)),
             wake_word_threshold=float(values.get("wake_word_threshold", 0.5)),
@@ -117,6 +128,27 @@ def amplified(audio: bytes, gain: float) -> bytes:
     if sys.byteorder != "little":
         samples.byteswap()
     return samples.tobytes()
+
+
+def chime_audio() -> bytes:
+    """Build the two-tone blip played when a conversation opens."""
+
+    samples = array.array("h")
+    fade = OUTPUT_SAMPLE_RATE * CHIME_FADE_MS // 1000
+    for frequency in CHIME_TONES:
+        length = OUTPUT_SAMPLE_RATE * CHIME_TONE_MS // 1000
+        for index in range(length):
+            # Without the fades each tone would start and end on a step, which
+            # a speaker reproduces as a click.
+            envelope = min(1.0, index / fade, (length - index) / fade)
+            value = math.sin(2 * math.pi * frequency * index / OUTPUT_SAMPLE_RATE)
+            samples.append(int(value * envelope * CHIME_LEVEL * 32767))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return samples.tobytes()
+
+
+CHIME = chime_audio()
 
 
 class AlsaCapture:
@@ -247,6 +279,16 @@ class AlsaPlayback:
             logger.warning("Playback stopped: %s", await _failure(process))
             await self.reset()
 
+    async def play_now(self, audio: bytes) -> None:
+        """Play a local sound without waiting for the jitter buffer to fill."""
+
+        process = self._process
+        if process is None or process.stdin is None:
+            return
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            process.stdin.write(audio)
+            await process.stdin.drain()
+
     async def reset(self) -> None:
         """Drop audio that is queued in ALSA as well as in this buffer.
 
@@ -350,6 +392,15 @@ class Session:
             elif isinstance(action, ServerError):
                 logger.error("Server error %s: %s", action.code, action.message)
 
+    async def _wake(self, now: float) -> None:
+        """Start or interrupt a conversation, and say so out loud locally."""
+
+        await self._apply(self.client.wake(now))
+        if self.config.wake_chime:
+            # After the actions, because interrupting a reply drops queued
+            # audio and would take the chime with it.
+            await self.playback.play_now(CHIME)
+
     async def _receive(self) -> None:
         async for message in self.connection:
             now = time.monotonic()
@@ -380,7 +431,7 @@ class Session:
             # invariant, and the amount that suits it is not the amount that
             # suits the model on the other end of the socket.
             elif self.wake_word.feed(amplified(chunk, wake_gain), time.monotonic()):
-                await self._apply(self.client.wake(time.monotonic()))
+                await self._wake(time.monotonic())
 
     async def _tick(self) -> None:
         while True:
@@ -396,7 +447,7 @@ class Session:
             if command in {"s", "stop"}:
                 await self._apply(self.client.request_stop(now))
             else:
-                await self._apply(self.client.wake(now))
+                await self._wake(now)
 
 
 class ConsoleCommands:

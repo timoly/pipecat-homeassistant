@@ -132,6 +132,17 @@ If the recording contains the playback at full volume, set `barge_in = false`.
 amixer -c PowerConf sset "PCM",0 80%
 ```
 
+## Why the assistant says nothing first
+
+The add-on suppresses a flow's greeting for a satellite running a live model,
+on purpose: the user spoke first, and a greeting nobody asked for is billed
+live audio. A satellite also holds its connection from boot, so a greeting on
+connect would play once, at night, to an empty room.
+
+The acknowledgement is local instead. `wake_chime` plays a short blip the
+moment the wake word lands, the way a Voice PE lights its ring, and it costs
+nothing because it never reaches the server.
+
 ## Cost
 
 The add-on opens one Live session per conversation and bills by the minute

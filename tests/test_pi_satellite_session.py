@@ -73,6 +73,7 @@ class FakePlayback:
     def __init__(self):
         self.prebuffer_ms = 300
         self.written: list[bytes] = []
+        self.played: list[bytes] = []
         self.resets = 0
 
     async def start(self) -> None:
@@ -83,6 +84,9 @@ class FakePlayback:
 
     async def write(self, audio: bytes) -> None:
         self.written.append(audio)
+
+    async def play_now(self, audio: bytes) -> None:
+        self.played.append(audio)
 
     async def reset(self) -> None:
         self.resets += 1
@@ -134,11 +138,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         wake_word=None,
         capture_gain: float = 1.0,
         wake_word_gain: float = 1.0,
+        wake_chime: bool = True,
     ):
         config = satellite.Config(
             url="ws://example.invalid/api/assist/esphome",
             capture_gain=capture_gain,
             wake_word_gain=wake_word_gain,
+            wake_chime=wake_chime,
         )
         session = satellite.Session(
             config,
@@ -257,6 +263,25 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.audio[0], satellite.amplified(CHUNK, 4.0))
         self.assertEqual(detector.heard[0], satellite.amplified(CHUNK, 2.0))
         self.assertNotEqual(connection.audio[0], detector.heard[0])
+
+    async def test_waking_is_acknowledged_out_loud(self):
+        connection = FakeConnection()
+        session = self._session(connection, "")
+
+        await self._run(session, connection)
+
+        # The add-on stays silent until the user has said something, so this
+        # chime is the only sign the satellite is listening.
+        self.assertEqual(session.playback.played, [satellite.CHIME])
+
+    async def test_the_chime_can_be_turned_off(self):
+        connection = FakeConnection()
+        session = self._session(connection, "", wake_chime=False)
+
+        await self._run(session, connection)
+
+        self.assertEqual(session.playback.played, [])
+        self.assertEqual(connection.types(), ["wake"])
 
     async def test_a_closed_socket_ends_the_session_instead_of_spinning(self):
         connection = FakeConnection()

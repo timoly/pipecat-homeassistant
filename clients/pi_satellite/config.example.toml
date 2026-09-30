@@ -24,6 +24,11 @@ capture_gain = 4.0
 # the assistant hears itself and interrupts itself.
 barge_in = true
 
+# A short blip when a conversation opens. The add-on deliberately stays silent
+# until you have said something — a greeting you did not ask for is billed live
+# audio — so this is the only sign that the wake word landed.
+wake_chime = true
+
 log_level = "INFO"
 
 # Wake word. Empty means the keyboard starts conversations.
