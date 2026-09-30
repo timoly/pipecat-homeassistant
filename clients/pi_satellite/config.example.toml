@@ -12,10 +12,12 @@ url = "ws://homeassistant.local:7860/api/assist/esphome?token=CHANGE_ME&flow_id=
 capture_device = "plughw:CARD=PowerConf"
 playback_device = "plughw:CARD=PowerConf"
 
-# Software gain on captured audio. The Anker PowerConf peaks around 5% of full
-# scale at two metres with its own mixer already at 100%, and 4.0 brings that to
-# a level the model hears comfortably. Watch the add-on log for
+# Software gain on what the add-on receives. The Anker PowerConf peaks around
+# 5% of full scale at two metres with its own mixer already at 100%, and 4.0
+# brings that to a level the model hears comfortably. Watch the add-on log for
 # "ESPHome audio ingress" lines and aim for a peak of 3000-10000.
+# The wake word is deliberately not amplified: its model was trained on ordinary
+# speech, and gain pushes the room out of the range it knows.
 capture_gain = 4.0
 
 # Keep the microphone open while the assistant speaks, so it can be interrupted.

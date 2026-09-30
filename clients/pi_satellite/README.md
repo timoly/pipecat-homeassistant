@@ -70,8 +70,17 @@ built for `aarch64`, so a 64-bit Raspberry Pi OS is required — check with
 `uname -m`.
 
 Tune `wake_word_threshold` from the log: raise it if the satellite wakes on its
-own, lower it if it misses you, and run with `log_level = "DEBUG"` to see the
-scores that were nearly accepted.
+own, lower it if it misses you. With `log_level = "DEBUG"` the detector reports
+its best score once a second, so a model that hears nothing can be told from one
+that is not running at all.
+
+To check the model and the microphone without this client in the way, record
+yourself and run pyopen-wakeword's own command over the file:
+
+```bash
+arecord -D plughw:CARD=PowerConf -f S16_LE -r 16000 -c 1 -d 6 /tmp/wake.wav
+.venv/bin/python -m pyopen_wakeword --model okay_nabu /tmp/wake.wav
+```
 
 **A phrase of your own**, for example a Finnish one, means training a model.
 openWakeWord's training notebook generates thousands of synthetic samples with
@@ -95,7 +104,9 @@ arecord -D plughw:CARD=PowerConf -f S16_LE -r 16000 -c 1 -V mono -d 15 /dev/null
 ```
 
 If the meter sits near a few percent while you speak from a couple of metres,
-raise `capture_gain`. The add-on logs what it actually receives once per second
+raise `capture_gain`. It applies only to the audio sent to the add-on; the wake
+word hears the room as the device recorded it, because its model was trained on
+ordinary speech and gain takes the room out of that range. The add-on logs what it actually receives once per second
 as `ESPHome audio ingress window=... peak=... rms=...`; aim for a peak of
 3000–10000 when speaking normally. The Anker PowerConf needs about `4.0`.
 

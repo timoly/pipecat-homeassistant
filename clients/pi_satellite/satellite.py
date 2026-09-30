@@ -124,11 +124,13 @@ class AlsaCapture:
     swallows the first word — USB speakerphones ramp their own processing when
     the stream starts — so capture runs continuously and unwanted audio is
     dropped instead.
+
+    Audio comes out as the device recorded it. Gain belongs to whoever wants it:
+    the model on the other end of the socket does, and the wake word does not.
     """
 
-    def __init__(self, device: str, *, gain: float = 1.0):
+    def __init__(self, device: str):
         self.device = device
-        self.gain = gain
         self.chunk_bytes = INPUT_SAMPLE_RATE * 2 * CHUNK_MS // 1000
         self._process: asyncio.subprocess.Process | None = None
 
@@ -156,12 +158,11 @@ class AlsaCapture:
         if process is None or process.stdout is None:
             raise RuntimeError("Capture has not been started")
         try:
-            data = await process.stdout.readexactly(self.chunk_bytes)
+            return await process.stdout.readexactly(self.chunk_bytes)
         except asyncio.IncompleteReadError as error:
             # A wrong device name is the common case here, and arecord explains
             # it on stderr — the reason belongs in the log, not just the exit code.
             raise RuntimeError(f"arecord stopped: {await _failure(process)}") from error
-        return amplified(data, self.gain)
 
     @property
     def running(self) -> bool:
@@ -360,13 +361,17 @@ class Session:
         raise ConnectionError("The add-on closed the connection")
 
     async def _send_microphone(self) -> None:
+        gain = self.config.capture_gain
         while True:
             chunk = await self.capture.read()
             if self.client.streaming_microphone:
                 async with self._send_lock:
-                    await self.connection.send(chunk)
+                    await self.connection.send(amplified(chunk, gain))
             if self.wake_word is None:
                 continue
+            # The wake word hears the room as it is. Its model was trained on
+            # ordinary speech, and the gain that makes a quiet speakerphone
+            # audible to the model on the other end pushes it out of that range.
             if self.client.active:
                 # Listening for the wake word during a conversation would only
                 # let the assistant's own voice trigger it.
@@ -454,7 +459,7 @@ def _wake_word(config: Config) -> WakeWord | None:
 async def run(config: Config) -> None:
     import websockets  # Imported here so the session layer stays testable.
 
-    capture = AlsaCapture(config.capture_device, gain=config.capture_gain)
+    capture = AlsaCapture(config.capture_device)
     console = ConsoleCommands()
     wake_word = _wake_word(config)
     delay = RECONNECT_MIN_SECS
@@ -508,6 +513,9 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+    # DEBUG is for tuning the wake word and the microphone level; the websocket
+    # library logs every audio frame at that level and buries everything else.
+    logging.getLogger("websockets").setLevel(logging.INFO)
     print("Enter = talk, s = stop, q = quit", flush=True)
     with contextlib.suppress(KeyboardInterrupt, SystemExit):
         asyncio.run(run(config))

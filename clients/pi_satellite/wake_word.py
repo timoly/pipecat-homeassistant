@@ -19,6 +19,9 @@ from collections.abc import Callable, Iterable
 
 # pyopen-wakeword documents 160 samples per call, and its own example asserts it.
 FRAME_BYTES = 320
+# How often the best recent score is reported, so tuning has something to read
+# and a detector that hears nothing at all can be told from one that is idle.
+REPORT_SECS = 1.0
 BUILTIN_MODELS = ("okay_nabu", "hey_jarvis", "hey_mycroft", "alexa", "hey_rhasspy")
 
 Scorer = Callable[[bytes], Iterable[float]]
@@ -75,6 +78,8 @@ class WakeWord:
         self._buffer = bytearray()
         self._quiet_until = 0.0
         self._fed = False
+        self._best = 0.0
+        self._reported_at = 0.0
 
     def feed(self, audio: bytes, now: float) -> bool:
         """Return True when the wake word was heard in the audio so far."""
@@ -89,6 +94,7 @@ class WakeWord:
                 # so a reply's worth of audio cannot pile up behind it.
                 continue
             for value in self.score(frame):
+                self._best = max(self._best, value)
                 if value >= self.threshold:
                     logger.info("Wake word %s: %.2f", self.name or "model", value)
                     self._quiet_until = now + self.cooldown_secs
@@ -96,12 +102,20 @@ class WakeWord:
                     # during the cooldown would otherwise leave it with a gap.
                     self._clear()
                     return True
-                if value >= self.threshold / 2:
-                    # Near misses are what a threshold is tuned from.
-                    logger.debug(
-                        "Wake word %s: %.2f (below %.2f)", self.name, value, self.threshold
-                    )
+            self._report(now)
         return False
+
+    def _report(self, now: float) -> None:
+        if now - self._reported_at < REPORT_SECS:
+            return
+        self._reported_at = now
+        logger.debug(
+            "Wake word %s: best %.3f in the last second (threshold %.2f)",
+            self.name or "model",
+            self._best,
+            self.threshold,
+        )
+        self._best = 0.0
 
     def reset(self) -> None:
         """Forget buffered audio, so a conversation leaves nothing behind."""
@@ -112,6 +126,7 @@ class WakeWord:
 
     def _clear(self) -> None:
         self._fed = False
+        self._best = 0.0
         self._buffer.clear()
         if self._forget_model is not None:
             self._forget_model()
