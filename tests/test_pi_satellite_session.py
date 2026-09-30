@@ -232,6 +232,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(connection.types(), ["wake"])
         self.assertGreaterEqual(len(connection.audio), 1)
+        # The chime is the only acknowledgement on the path people actually use.
+        self.assertEqual(session.playback.played, [satellite.CHIME])
 
     async def test_the_wake_word_is_not_listened_for_during_a_conversation(self):
         connection = FakeConnection()

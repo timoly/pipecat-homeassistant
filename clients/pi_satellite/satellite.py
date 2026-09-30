@@ -62,6 +62,13 @@ CHIME_TONES = (880, 1175)
 CHIME_TONE_MS = 70
 CHIME_FADE_MS = 5
 CHIME_LEVEL = 0.2
+# Trailing silence, so the tone is not left waiting in aplay's read buffer for
+# audio that only arrives when the assistant answers.
+CHIME_TAIL_MS = 60
+# aplay hands ALSA one period at a time, and a default period is longer than the
+# chime. A short one plays it at once and costs a Pi 3 nothing measurable.
+PLAYBACK_PERIOD_US = 20000
+PLAYBACK_BUFFER_US = 400000
 
 logger = logging.getLogger("satellite")
 
@@ -143,6 +150,7 @@ def chime_audio() -> bytes:
             envelope = min(1.0, index / fade, (length - index) / fade)
             value = math.sin(2 * math.pi * frequency * index / OUTPUT_SAMPLE_RATE)
             samples.append(int(value * envelope * CHIME_LEVEL * 32767))
+    samples.extend([0] * (OUTPUT_SAMPLE_RATE * CHIME_TAIL_MS // 1000))
     if sys.byteorder != "little":
         samples.byteswap()
     return samples.tobytes()
@@ -246,6 +254,8 @@ class AlsaPlayback:
             str(OUTPUT_SAMPLE_RATE),
             "-c",
             "1",
+            f"--period-time={PLAYBACK_PERIOD_US}",
+            f"--buffer-time={PLAYBACK_BUFFER_US}",
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
