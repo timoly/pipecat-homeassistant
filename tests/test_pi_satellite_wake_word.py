@@ -18,10 +18,10 @@ try:
     from wake_word import FRAME_BYTES, WakeWord  # noqa: E402
 except ImportError:  # The add-on image ships the server, not the Pi client.
     WakeWord = None
-    FRAME_BYTES = 320
+    FRAME_BYTES = 2048
 
-FRAME = b"\x10\x00" * 160  # 10 ms at 16 kHz, one call into the detector
-HALF_FRAME = b"\x10\x00" * 80
+FRAME = b"\x10\x00" * 1024  # 64 ms at 16 kHz, one call into the detector
+HALF_FRAME = b"\x10\x00" * 512
 
 
 class FakeScorer:

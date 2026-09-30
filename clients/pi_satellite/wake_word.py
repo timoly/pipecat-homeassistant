@@ -17,8 +17,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable
 
-# pyopen-wakeword documents 160 samples per call, and its own example asserts it.
-FRAME_BYTES = 320
+# 1024 samples, 64 ms at 16 kHz: what pyopen-wakeword's own live command reads
+# from stdin and what Home Assistant's Wyoming server streams. Its README shows
+# 160 samples, but that path is not the one either of them runs, and smaller
+# chunks also shift the extractor's ten-second buffer six times as often.
+FRAME_BYTES = 2048
 # How often the best recent score is reported, so tuning has something to read
 # and a detector that hears nothing at all can be told from one that is idle.
 REPORT_SECS = 1.0
