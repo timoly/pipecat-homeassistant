@@ -69,10 +69,14 @@ models, so there is no ONNX or TFLite runtime to find for the Pi. Its wheels are
 built for `aarch64`, so a 64-bit Raspberry Pi OS is required — check with
 `uname -m`.
 
-Tune `wake_word_threshold` from the log: raise it if the satellite wakes on its
-own, lower it if it misses you. With `log_level = "DEBUG"` the detector reports
-its best score once a second, so a model that hears nothing can be told from one
-that is not running at all.
+Tune it from the log. With `log_level = "DEBUG"` the detector reports its best
+score once a second, so a model that hears nothing can be told from one that is
+not running at all. Speak normally from where you will stand and watch the
+number: it should reach 0.7 or more. If it sits near 0.02 and only a raised
+voice gets through, raise `wake_word_gain` — an Anker PowerConf needs about 4.
+Too much clips a raised voice into distortion and costs detections. Only once
+the number is right is `wake_word_threshold` worth touching: raise it if the
+satellite wakes on its own, lower it if it still misses you.
 
 To check the model and the microphone without this client in the way, record
 yourself and run pyopen-wakeword's own command over the file:
@@ -104,9 +108,9 @@ arecord -D plughw:CARD=PowerConf -f S16_LE -r 16000 -c 1 -V mono -d 15 /dev/null
 ```
 
 If the meter sits near a few percent while you speak from a couple of metres,
-raise `capture_gain`. It applies only to the audio sent to the add-on; the wake
-word hears the room as the device recorded it, because its model was trained on
-ordinary speech and gain takes the room out of that range. The add-on logs what it actually receives once per second
+raise `capture_gain`. It applies only to the audio sent to the add-on. The wake
+word has its own `wake_word_gain`, because neither model is level invariant and
+the amount that suits one is not the amount that suits the other. The add-on logs what it actually receives once per second
 as `ESPHome audio ingress window=... peak=... rms=...`; aim for a peak of
 3000–10000 when speaking normally. The Anker PowerConf needs about `4.0`.
 

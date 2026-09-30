@@ -67,6 +67,7 @@ class Config:
     capture_gain: float = 1.0
     barge_in: bool = True
     wake_word_model: str = ""
+    wake_word_gain: float = 1.0
     wake_word_threshold: float = 0.5
     wake_word_cooldown_secs: float = 2.0
     log_level: str = "INFO"
@@ -90,6 +91,7 @@ class Config:
             capture_gain=float(values.get("capture_gain", 1.0)),
             barge_in=bool(values.get("barge_in", True)),
             wake_word_model=str(values.get("wake_word_model", "")),
+            wake_word_gain=float(values.get("wake_word_gain", 1.0)),
             wake_word_threshold=float(values.get("wake_word_threshold", 0.5)),
             wake_word_cooldown_secs=float(values.get("wake_word_cooldown_secs", 2.0)),
             log_level=str(values.get("log_level", "INFO")).upper(),
@@ -362,6 +364,7 @@ class Session:
 
     async def _send_microphone(self) -> None:
         gain = self.config.capture_gain
+        wake_gain = self.config.wake_word_gain
         while True:
             chunk = await self.capture.read()
             if self.client.streaming_microphone:
@@ -369,14 +372,14 @@ class Session:
                     await self.connection.send(amplified(chunk, gain))
             if self.wake_word is None:
                 continue
-            # The wake word hears the room as it is. Its model was trained on
-            # ordinary speech, and the gain that makes a quiet speakerphone
-            # audible to the model on the other end pushes it out of that range.
             if self.client.active:
                 # Listening for the wake word during a conversation would only
                 # let the assistant's own voice trigger it.
                 self.wake_word.reset()
-            elif self.wake_word.feed(chunk, time.monotonic()):
+            # The wake word gets its own gain. Its model is not level
+            # invariant, and the amount that suits it is not the amount that
+            # suits the model on the other end of the socket.
+            elif self.wake_word.feed(amplified(chunk, wake_gain), time.monotonic()):
                 await self._apply(self.client.wake(time.monotonic()))
 
     async def _tick(self) -> None:
@@ -443,9 +446,10 @@ def _wake_word(config: Config) -> WakeWord | None:
             "Install it with: pip install pyopen-wakeword"
         ) from error
     logger.info(
-        "Wake word %s ready (threshold %.2f)",
+        "Wake word %s ready (threshold %.2f, gain %.1f)",
         config.wake_word_model,
         config.wake_word_threshold,
+        config.wake_word_gain,
     )
     return WakeWord(
         score,

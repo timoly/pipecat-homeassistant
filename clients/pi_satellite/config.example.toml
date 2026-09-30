@@ -16,8 +16,7 @@ playback_device = "plughw:CARD=PowerConf"
 # 5% of full scale at two metres with its own mixer already at 100%, and 4.0
 # brings that to a level the model hears comfortably. Watch the add-on log for
 # "ESPHome audio ingress" lines and aim for a peak of 3000-10000.
-# The wake word is deliberately not amplified: its model was trained on ordinary
-# speech, and gain pushes the room out of the range it knows.
+# The wake word has its own gain below: the two models want different amounts.
 capture_gain = 4.0
 
 # Keep the microphone open while the assistant speaks, so it can be interrupted.
@@ -33,6 +32,12 @@ log_level = "INFO"
 # "okay_nabu" is what a Home Assistant Voice PE answers to, so a house with both
 # keeps one wake word. A path to a .tflite file uses a model of your own instead.
 wake_word_model = ""
+# The wake word model is not level invariant, and a speakerphone this quiet
+# needs help to reach it: at gain 1.0 an Anker PowerConf only detects a raised
+# voice. Tune it from the DEBUG log, where the detector reports its best score
+# once a second — normal speech from where you stand should reach 0.7 or more.
+# Too much gain clips a raised voice into distortion and costs detections.
+wake_word_gain = 4.0
 # Raise this if the satellite wakes on its own, lower it if it misses you. Run
 # with log_level = "DEBUG" to see the scores it almost accepted.
 wake_word_threshold = 0.5

@@ -133,10 +133,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         no_speech_secs: float = 30.0,
         wake_word=None,
         capture_gain: float = 1.0,
+        wake_word_gain: float = 1.0,
     ):
         config = satellite.Config(
             url="ws://example.invalid/api/assist/esphome",
             capture_gain=capture_gain,
+            wake_word_gain=wake_word_gain,
         )
         session = satellite.Session(
             config,
@@ -238,19 +240,23 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detector.windows_fed, 0)
         self.assertGreater(detector.resets, 0)
 
-    async def test_gain_reaches_the_server_but_not_the_wake_word(self):
+    async def test_each_listener_gets_its_own_gain(self):
         connection = FakeConnection()
         detector = FakeWakeWord()
-        session = self._session(connection, wake_word=detector, capture_gain=4.0)
+        session = self._session(
+            connection,
+            wake_word=detector,
+            capture_gain=4.0,
+            wake_word_gain=2.0,
+        )
 
         await self._run(session, connection)
 
-        # The model on the other end needs a quiet speakerphone amplified; the
-        # wake word was trained on ordinary speech and must hear the room as
-        # the device recorded it.
+        # Neither model is level invariant, and the amount of gain that suits
+        # one is not the amount that suits the other.
         self.assertEqual(connection.audio[0], satellite.amplified(CHUNK, 4.0))
-        self.assertNotEqual(connection.audio[0], CHUNK)
-        self.assertEqual(detector.heard[0], CHUNK)
+        self.assertEqual(detector.heard[0], satellite.amplified(CHUNK, 2.0))
+        self.assertNotEqual(connection.audio[0], detector.heard[0])
 
     async def test_a_closed_socket_ends_the_session_instead_of_spinning(self):
         connection = FakeConnection()
