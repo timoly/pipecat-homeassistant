@@ -154,9 +154,31 @@ saving if the satellite sits in a room with background noise.
 
 ## Running at boot
 
-`pipecat-satellite.service` is a systemd unit for later. There is no console
-under systemd, so it is only useful once a wake word or a button starts
-conversations — until then, run `satellite.py` from a shell.
+`pipecat-satellite.service` is a systemd user service, so it runs as the user
+who owns the audio device and the configuration in `~/.config`, with no root
+anywhere. It needs a wake word to be useful — a service has no keyboard — so set
+`wake_word_model` first.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp ~/pipecat-homeassistant/clients/pi_satellite/pipecat-satellite.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now pipecat-satellite
+sudo loginctl enable-linger "$USER"
+```
+
+That last line is what keeps it running with nobody logged in. Afterwards:
+
+```bash
+systemctl --user status pipecat-satellite
+journalctl --user -u pipecat-satellite -f
+```
+
+After a `git pull` that changes `satellite.py`, restart it:
+
+```bash
+systemctl --user restart pipecat-satellite
+```
 
 ## Files
 
