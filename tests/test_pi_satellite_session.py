@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import unittest
 from pathlib import Path
@@ -140,6 +141,35 @@ class FakeProcess:
     def __init__(self, lines=()):
         self.stderr = FakeStderr(lines)
         self.returncode = 1
+
+
+@unittest.skipUnless(satellite, "The Pi satellite client is not available here")
+class LevelProbeTests(unittest.TestCase):
+    """The probe is what tells echo cancellation from the lack of it."""
+
+    def test_the_level_is_reported_with_what_the_speaker_was_doing(self):
+        probe = satellite.LevelProbe(interval_secs=0.0)
+        loud = (8000).to_bytes(2, "little", signed=True) * 320
+
+        with self.assertLogs(satellite.logger, logging.DEBUG) as captured:
+            probe.add(loud, True, 1.0)
+
+        self.assertIn("peak 8000", captured.output[0])
+        self.assertIn("assistant speaking", captured.output[0])
+
+    def test_nothing_is_measured_unless_debug_is_on(self):
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        satellite.logger.addHandler(handler)
+        satellite.logger.setLevel(logging.INFO)
+        self.addCleanup(satellite.logger.removeHandler, handler)
+        self.addCleanup(satellite.logger.setLevel, logging.NOTSET)
+
+        satellite.LevelProbe(interval_secs=0.0).add(b"\x40\x1f" * 320, True, 1.0)
+
+        # Measuring every sample in Python is not free on a Pi 3.
+        self.assertEqual(records, [])
 
 
 @unittest.skipUnless(satellite, "The Pi satellite client is not available here")

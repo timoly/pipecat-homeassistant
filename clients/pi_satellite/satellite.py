@@ -177,6 +177,47 @@ def chime_audio() -> bytes:
 CHIME = chime_audio()
 
 
+class LevelProbe:
+    """Report the captured level once a second, split by what the speaker is doing.
+
+    This is how echo cancellation is judged: with the speakerphone cancelling
+    its own output, the level while the assistant talks stays near the level of
+    a quiet room. Without it, the microphone hears the reply, the model hears
+    itself, and the conversation never settles.
+    """
+
+    def __init__(self, interval_secs: float = 1.0):
+        self.interval_secs = interval_secs
+        self._reported_at = 0.0
+        self._peak = 0
+        self._energy = 0
+        self._count = 0
+
+    def add(self, audio: bytes, speaking: bool, now: float) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        samples = array.array("h")
+        samples.frombytes(audio[: len(audio) - len(audio) % 2])
+        if sys.byteorder != "little":
+            samples.byteswap()
+        for sample in samples:
+            self._peak = max(self._peak, abs(sample))
+            self._energy += sample * sample
+        self._count += len(samples)
+        if now - self._reported_at < self.interval_secs or not self._count:
+            return
+        self._reported_at = now
+        logger.debug(
+            "Capture level: peak %d rms %d (assistant %s)",
+            self._peak,
+            int(math.sqrt(self._energy / self._count)),
+            "speaking" if speaking else "quiet",
+        )
+        self._peak = 0
+        self._energy = 0
+        self._count = 0
+
+
 class AlsaCapture:
     """Keep one ``arecord`` running for the whole session.
 
@@ -432,6 +473,7 @@ class Session:
         # Conversations start from the console today and from a wake word or a
         # button later; the protocol cannot tell the difference.
         self._next_command = commands or ConsoleCommands()
+        self._level = LevelProbe()
         self._send_lock = asyncio.Lock()
 
     async def run(self) -> None:
@@ -496,6 +538,7 @@ class Session:
         wake_gain = self.config.wake_word_gain
         while True:
             chunk = await self.capture.read()
+            self._level.add(chunk, self.client.phase in {"speaking", "replying"}, time.monotonic())
             if self.client.streaming_microphone:
                 async with self._send_lock:
                     await self.connection.send(amplified(chunk, gain))

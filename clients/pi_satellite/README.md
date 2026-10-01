@@ -124,15 +124,32 @@ as `ESPHome audio ingress window=... peak=... rms=...`; aim for a peak of
 
 **Barge-in.** `barge_in = true` keeps the microphone open while the assistant
 speaks, so you can interrupt it. That only works when the speakerphone cancels
-its own echo; otherwise the assistant hears itself and interrupts itself. Test
-it before trusting it:
+its own output; otherwise the model hears itself, treats it as the user's turn,
+and the conversation never settles — phases flap between speaking and listening,
+and the assistant answers itself.
 
-```bash
-arecord -D plughw:CARD=PowerConf -f S16_LE -r 16000 -c 1 -d 8 /tmp/echo.wav & \
-  sleep 1; aplay -D plughw:CARD=PowerConf /tmp/some-speech.wav; wait
+There is nothing to tune inside the cancellation itself: it runs in the
+speakerphone's own processing. What you decide is whether to trust it. With
+`log_level = "DEBUG"` the client reports the captured level once a second and
+says what the speaker was doing:
+
+```
+Capture level: peak 210 rms 48 (assistant quiet)
+Capture level: peak 265 rms 61 (assistant speaking)
 ```
 
-If the recording contains the playback at full volume, set `barge_in = false`.
+Those two lines are the answer. Ask for a long answer, stay silent while it
+plays, and compare. A level while the assistant speaks that stays near the
+quiet-room level means cancellation is working and `barge_in = true` is safe. A
+level that jumps by a factor of ten or more means the microphone is hearing the
+reply, and `barge_in = false` closes it for the duration — you then interrupt
+with the wake word instead of by talking over it.
+
+Three things help when cancellation is marginal, in this order: lower the
+playback volume, which is the strongest lever since the echo scales with it;
+lower `capture_gain`, which amplifies the echo along with the speech; and stand
+the device on a hard flat surface away from a wall that reflects its own output
+back into it.
 
 **Playback volume** is an ALSA control on the device, so the same mixer applies:
 
