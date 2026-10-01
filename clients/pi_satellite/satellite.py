@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from wake_word import WakeWord, open_wake_word  # noqa: E402
+from wake_word import FRAME_BYTES, WakeWord, open_wake_word  # noqa: E402
 
 from satellite_protocol import (  # noqa: E402
     INPUT_SAMPLE_RATE,
@@ -654,11 +654,20 @@ def _wake_word(config: Config) -> WakeWord | None:
             f"Cannot load the wake word {config.wake_word_model!r}: {error}\n"
             "Install it with: pip install pyopen-wakeword"
         ) from error
+    # The feature extractor fills eight seconds of history on its first call, so
+    # that call carries eight seconds of work. Left until audio is flowing it
+    # blocks the loop that drains the microphone, and arecord loses half a
+    # second of what it recorded meanwhile.
+    started = time.monotonic()
+    for _ in score(b"\x00" * FRAME_BYTES):
+        pass
+    forget()
     logger.info(
-        "Wake word %s ready (threshold %.2f, gain %.1f)",
+        "Wake word %s ready (threshold %.2f, gain %.1f, warmed in %.0f ms)",
         config.wake_word_model,
         config.wake_word_threshold,
         config.wake_word_gain,
+        (time.monotonic() - started) * 1000,
     )
     return WakeWord(
         score,

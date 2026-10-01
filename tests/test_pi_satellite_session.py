@@ -144,6 +144,27 @@ class FakeProcess:
 
 
 @unittest.skipUnless(satellite, "The Pi satellite client is not available here")
+class WakeWordStartupTests(unittest.TestCase):
+    def test_the_model_runs_once_before_any_audio_is_captured(self):
+        frames = []
+
+        def fake_open(model):
+            return (lambda frame: frames.append(len(frame)) or iter(())), lambda: None
+
+        original, satellite.open_wake_word = satellite.open_wake_word, fake_open
+        self.addCleanup(setattr, satellite, "open_wake_word", original)
+
+        satellite._wake_word(
+            satellite.Config(url="ws://example.invalid", wake_word_model="okay_nabu")
+        )
+
+        # The extractor fills eight seconds of history on its first call. Left
+        # until audio is flowing, that work blocks the loop draining the
+        # microphone and arecord loses what it recorded meanwhile.
+        self.assertEqual(frames, [satellite.FRAME_BYTES])
+
+
+@unittest.skipUnless(satellite, "The Pi satellite client is not available here")
 class LevelProbeTests(unittest.TestCase):
     """The probe is what tells echo cancellation from the lack of it."""
 
