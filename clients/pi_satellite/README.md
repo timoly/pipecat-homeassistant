@@ -80,10 +80,10 @@ built for `aarch64`, so a 64-bit Raspberry Pi OS is required — check with
 Tune it from the log. With `log_level = "DEBUG"` the detector reports its best
 score once a second, so a model that hears nothing can be told from one that is
 not running at all. Speak normally from where you will stand and watch the
-number: it should reach 0.7 or more. If it sits near 0.02 and only a raised
-voice gets through, raise `wake_word_gain` — an Anker PowerConf needs about 4.
-Too much clips a raised voice into distortion and costs detections. Only once
-the number is right is `wake_word_threshold` worth touching: raise it if the
+number: it should reach 0.7 or more. If it sits near 0.02, check the capture
+level before reaching for `wake_word_gain` — gain is not a free improvement, and
+a score that falls when you raise it is clipping, not a threshold problem. Only
+once the number is right is `wake_word_threshold` worth touching: raise it if the
 satellite wakes on its own, lower it if it still misses you.
 
 To check the model and the microphone without this client in the way, record
@@ -107,20 +107,26 @@ engine can replace this one without touching the rest.
 
 ## Tuning
 
-**Microphone level.** Speakerphones vary wildly in how hot their USB capture
-is, and ALSA may have no gain left to give:
+**Microphone level.** Leave both gains at 1.0 until a measurement says
+otherwise. A USB speakerphone runs its own automatic gain, and an Anker
+PowerConf reaches 20000–28000 of full scale from normal speech across a room —
+any multiplier on top of that clips the loudest part of every sentence, which
+costs a model far more than quiet audio does. With `log_level = "DEBUG"` the
+client reports the level once a second and says so:
 
-```bash
-amixer -c PowerConf                     # is `Mic` already at 100%?
-arecord -D plughw:CARD=PowerConf -f S16_LE -r 16000 -c 1 -V mono -d 15 /dev/null
+```
+Capture level: peak 28469 x4.0 = 32767 CLIPPING rms 4528 (assistant quiet)
 ```
 
-If the meter sits near a few percent while you speak from a couple of metres,
-raise `capture_gain`. It applies only to the audio sent to the add-on. The wake
-word has its own `wake_word_gain`, because neither model is level invariant and
-the amount that suits one is not the amount that suits the other. The add-on logs what it actually receives once per second
-as `ESPHome audio ingress window=... peak=... rms=...`; aim for a peak of
-3000–10000 when speaking normally. The Anker PowerConf needs about `4.0`.
+Speak normally from where you will stand — no wake word needed, the level is
+measured whether or not a conversation is open — and read the peaks:
+
+```bash
+journalctl --user-unit=pipecat-satellite --since "-2min" | grep -o "peak [0-9]*" | sort -k2 -rn | head -5
+```
+
+Aim for a peak between 8000 and 20000 after gain. Raise `capture_gain` only if
+the device really is quiet, and never past the point where CLIPPING appears.
 
 **Barge-in.** `barge_in = true` keeps the microphone open while the assistant
 speaks, so you can interrupt it. That only works when the speakerphone cancels

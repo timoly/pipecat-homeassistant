@@ -157,6 +157,17 @@ class LevelProbeTests(unittest.TestCase):
         self.assertIn("peak 8000", captured.output[0])
         self.assertIn("assistant speaking", captured.output[0])
 
+    def test_a_gain_that_clips_says_so(self):
+        probe = satellite.LevelProbe(interval_secs=0.0, gain=4.0)
+        loud = (28469).to_bytes(2, "little", signed=True) * 320
+
+        with self.assertLogs(satellite.logger, logging.DEBUG) as captured:
+            probe.add(loud, False, 1.0)
+
+        # Setting a gain by guesswork is how the loudest part of every sentence
+        # ends up flattened before the model ever hears it.
+        self.assertIn("CLIPPING", captured.output[0])
+
     def test_nothing_is_measured_unless_debug_is_on(self):
         records = []
         handler = logging.Handler()

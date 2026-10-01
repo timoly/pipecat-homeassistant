@@ -186,8 +186,9 @@ class LevelProbe:
     itself, and the conversation never settles.
     """
 
-    def __init__(self, interval_secs: float = 1.0):
+    def __init__(self, interval_secs: float = 1.0, gain: float = 1.0):
         self.interval_secs = interval_secs
+        self.gain = gain
         self._reported_at = 0.0
         self._peak = 0
         self._energy = 0
@@ -207,9 +208,16 @@ class LevelProbe:
         if now - self._reported_at < self.interval_secs or not self._count:
             return
         self._reported_at = now
+        scaled = self._peak * self.gain
+        # A gain that takes the peak past full scale clips the loudest part of
+        # every sentence, which costs the model more than quiet audio does.
+        headroom = " CLIPPING" if scaled > 32767 else ""
         logger.debug(
-            "Capture level: peak %d rms %d (assistant %s)",
+            "Capture level: peak %d x%.1f = %d%s rms %d (assistant %s)",
             self._peak,
+            self.gain,
+            min(32767, int(scaled)),
+            headroom,
             int(math.sqrt(self._energy / self._count)),
             "speaking" if speaking else "quiet",
         )
@@ -473,7 +481,7 @@ class Session:
         # Conversations start from the console today and from a wake word or a
         # button later; the protocol cannot tell the difference.
         self._next_command = commands or ConsoleCommands()
-        self._level = LevelProbe()
+        self._level = LevelProbe(gain=config.capture_gain)
         self._send_lock = asyncio.Lock()
 
     async def run(self) -> None:

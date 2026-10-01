@@ -12,12 +12,13 @@ url = "ws://homeassistant.local:7860/api/assist/esphome?token=CHANGE_ME&flow_id=
 capture_device = "plughw:CARD=PowerConf"
 playback_device = "plughw:CARD=PowerConf"
 
-# Software gain on what the add-on receives. The Anker PowerConf peaks around
-# 5% of full scale at two metres with its own mixer already at 100%, and 4.0
-# brings that to a level the model hears comfortably. Watch the add-on log for
-# "ESPHome audio ingress" lines and aim for a peak of 3000-10000.
-# The wake word has its own gain below: the two models want different amounts.
-capture_gain = 4.0
+# Software gain on what the add-on receives. Leave it at 1.0 until a
+# measurement says otherwise: an Anker PowerConf runs its own automatic gain and
+# reaches 20000-28000 of full scale from normal speech across a room, where any
+# multiplier clips the loudest part of every sentence. With log_level = "DEBUG"
+# the capture level is reported once a second and says CLIPPING when it does.
+# Aim for a peak between 8000 and 20000 after gain.
+capture_gain = 1.0
 
 # Keep the microphone open while the assistant speaks, so it can be interrupted.
 # Only leave this on when the speakerphone cancels its own echo well — otherwise
@@ -43,12 +44,11 @@ log_level = "INFO"
 # "okay_nabu" is what a Home Assistant Voice PE answers to, so a house with both
 # keeps one wake word. A path to a .tflite file uses a model of your own instead.
 wake_word_model = ""
-# The wake word model is not level invariant, and a speakerphone this quiet
-# needs help to reach it: at gain 1.0 an Anker PowerConf only detects a raised
-# voice. Tune it from the DEBUG log, where the detector reports its best score
-# once a second — normal speech from where you stand should reach 0.7 or more.
-# Too much gain clips a raised voice into distortion and costs detections.
-wake_word_gain = 4.0
+# The wake word has its own gain, since the two models are not level invariant
+# and need not want the same amount. Start at 1.0 here too and raise it only if
+# the detector's best score stays low: gain is not a free improvement, and too
+# much of it clips speech into distortion and costs detections.
+wake_word_gain = 1.0
 # Raise this if the satellite wakes on its own, lower it if it misses you. Run
 # with log_level = "DEBUG" to see the scores it almost accepted.
 wake_word_threshold = 0.5
