@@ -515,6 +515,10 @@ class Session:
         # button later; the protocol cannot tell the difference.
         self._next_command = commands or ConsoleCommands()
         self._level = LevelProbe(gain=config.capture_gain)
+        # A second of audio waiting for the detector. Reading the microphone
+        # must never wait for inference: arecord loses what it recorded while
+        # nobody drains its pipe, and a phrase with a hole in it is not heard.
+        self._wake_audio: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
         self._send_lock = asyncio.Lock()
 
     async def run(self) -> None:
@@ -524,6 +528,8 @@ class Session:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(self._receive())
                 tasks.create_task(self._send_microphone())
+                if self.wake_word is not None:
+                    tasks.create_task(self._detect_wake_word())
                 tasks.create_task(self._tick())
                 tasks.create_task(self._read_commands())
         finally:
@@ -589,10 +595,23 @@ class Session:
                 # Listening for the wake word during a conversation would only
                 # let the assistant's own voice trigger it.
                 self.wake_word.reset()
-            # The wake word gets its own gain. Its model is not level
-            # invariant, and the amount that suits it is not the amount that
-            # suits the model on the other end of the socket.
-            elif self.wake_word.feed(amplified(chunk, wake_gain), time.monotonic()):
+                continue
+            # The wake word gets its own gain. Its model is not level invariant,
+            # and the amount that suits it is not the amount that suits the
+            # model on the other end of the socket.
+            try:
+                self._wake_audio.put_nowait(amplified(chunk, wake_gain))
+            except asyncio.QueueFull:
+                # Dropping a chunk for the detector beats holding up the read.
+                logger.debug("Wake word is behind; dropped a chunk")
+
+    async def _detect_wake_word(self) -> None:
+        """Run the detector off the event loop, in a thread of its own."""
+
+        while True:
+            chunk = await self._wake_audio.get()
+            heard = await asyncio.to_thread(self.wake_word.feed, chunk, time.monotonic())
+            if heard:
                 await self._wake(time.monotonic())
 
     async def _tick(self) -> None:
@@ -697,7 +716,6 @@ def _wake_word(config: Config) -> WakeWord | None:
     )
     return WakeWord(
         score,
-        forget=forget,
         threshold=config.wake_word_threshold,
         cooldown_secs=config.wake_word_cooldown_secs,
         name=config.wake_word_model,

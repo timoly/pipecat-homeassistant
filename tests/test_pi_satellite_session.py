@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -356,6 +357,23 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(connection.audio), 1)
         # The chime is the only acknowledgement on the path people actually use.
         self.assertEqual(session.playback.played, [satellite.CHIME])
+
+    async def test_the_microphone_is_read_even_when_the_detector_is_behind(self):
+        connection = FakeConnection()
+
+        class SlowWakeWord(FakeWakeWord):
+            def feed(self, audio: bytes, now: float) -> bool:
+                time.sleep(0.05)  # Inference, in its own thread.
+                return super().feed(audio, now)
+
+        detector = SlowWakeWord(windows_before_hit=1000)
+        session = self._session(connection, wake_word=detector)
+
+        await self._run(session, connection, settle=0.3)
+
+        # A detector that cannot keep up must not stop the loop that drains
+        # arecord: a pipe nobody reads costs the audio recorded meanwhile.
+        self.assertGreater(len(detector.heard), 1)
 
     async def test_the_wake_word_is_not_listened_for_during_a_conversation(self):
         connection = FakeConnection()

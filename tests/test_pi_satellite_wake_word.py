@@ -85,14 +85,18 @@ class WakeWordTests(unittest.TestCase):
         self.assertTrue(detector.feed(FRAME, 12.5))
         self.assertEqual(len(scorer.frames), 2)
 
-    def test_a_detection_also_clears_the_model_history(self):
-        forgotten = []
-        detector = WakeWord(FakeScorer(1.0), forget=lambda: forgotten.append(True))
-
+    def test_the_model_history_survives_a_conversation(self):
+        scorer = FakeScorer(0.1, 1.0)
+        detector = WakeWord(scorer, threshold=0.5)
         detector.feed(FRAME, 0.0)
 
-        # Frames dropped during the cooldown would leave the model with a gap.
-        self.assertEqual(len(forgotten), 1)
+        detector.reset()
+
+        # Resetting the model would set its extractor back to filling eight
+        # seconds, and that work lands on the next call — stalling the loop that
+        # drains the microphone, which then loses audio.
+        self.assertTrue(detector.feed(FRAME, 1.0))
+        self.assertEqual(len(scorer.frames), 2)
 
     def test_buffered_audio_does_not_survive_a_conversation(self):
         scorer = FakeScorer(1.0)
@@ -148,14 +152,15 @@ class WakeWordTests(unittest.TestCase):
         self.assertEqual(len(misses), 2)
 
     def test_resetting_an_untouched_detector_costs_nothing(self):
-        forgotten = []
-        detector = WakeWord(FakeScorer(), forget=lambda: forgotten.append(True))
+        detector = WakeWord(FakeScorer())
+        detector.feed(HALF_FRAME, 0.0)
 
         detector.reset()
-        detector.reset()
 
-        # reset() runs on every captured chunk while a conversation is open.
-        self.assertEqual(forgotten, [])
+        # reset() runs on every captured chunk while a conversation is open, so
+        # it must be free once there is nothing left to drop.
+        self.assertFalse(detector._fed)
+        detector.reset()
 
 
 if __name__ == "__main__":
