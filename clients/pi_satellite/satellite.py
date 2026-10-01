@@ -519,6 +519,7 @@ class Session:
         # must never wait for inference: arecord loses what it recorded while
         # nobody drains its pipe, and a phrase with a hole in it is not heard.
         self._wake_audio: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
+        self._wake_stale = False
         self._send_lock = asyncio.Lock()
 
     async def run(self) -> None:
@@ -593,8 +594,10 @@ class Session:
                 continue
             if self.client.active:
                 # Listening for the wake word during a conversation would only
-                # let the assistant's own voice trigger it.
-                self.wake_word.reset()
+                # let the assistant's own voice trigger it. The detector's own
+                # task clears it afterwards: the model belongs to that thread,
+                # and touching it from here would race with an inference.
+                self._wake_stale = True
                 continue
             # The wake word gets its own gain. Its model is not level invariant,
             # and the amount that suits it is not the amount that suits the
@@ -610,6 +613,9 @@ class Session:
 
         while True:
             chunk = await self._wake_audio.get()
+            if self._wake_stale:
+                self._wake_stale = False
+                await asyncio.to_thread(self.wake_word.reset)
             heard = await asyncio.to_thread(self.wake_word.feed, chunk, time.monotonic())
             if heard:
                 await self._wake(time.monotonic())
@@ -716,6 +722,7 @@ def _wake_word(config: Config) -> WakeWord | None:
     )
     return WakeWord(
         score,
+        forget=forget,
         threshold=config.wake_word_threshold,
         cooldown_secs=config.wake_word_cooldown_secs,
         name=config.wake_word_model,

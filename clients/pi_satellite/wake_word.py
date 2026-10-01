@@ -83,6 +83,7 @@ class WakeWord:
         self,
         score: Scorer,
         *,
+        forget: Callable[[], None] | None = None,
         threshold: float = 0.5,
         cooldown_secs: float = 2.0,
         name: str = "",
@@ -95,6 +96,7 @@ class WakeWord:
         self.name = name
         self.on_near_miss = on_near_miss
         self.near_miss_score = near_miss_score
+        self._forget_model = forget
         self._buffer = bytearray()
         self._quiet_until = 0.0
         self._fed = False
@@ -156,15 +158,14 @@ class WakeWord:
         self._best_peak = 0
 
     def reset(self) -> None:
-        """Drop part-built frames, so a conversation leaves nothing behind.
+        """Forget the room, so a conversation leaves nothing behind.
 
-        The model's own history is deliberately left alone. Resetting it sets
-        its feature extractor back to filling eight seconds, which makes the
-        next call after a conversation carry eight seconds of work — enough to
-        stall the loop that drains the microphone, and arecord then loses what
-        it recorded meanwhile. The cooldown is what keeps one phrase from waking
-        the satellite twice; by the time it is over, the phrase has fallen out of
-        the model's 775 ms window anyway.
+        The model keeps ten seconds of audio and decides from the last 775 ms of
+        it. Nothing is fed to it while a conversation is open, so its view of the
+        room stops there: without this, the phrase that started the conversation
+        was still in its window afterwards and woke the satellite again, every
+        seven seconds, in a silent room. Clearing it costs a refill of eight
+        seconds of history, which is why the detector runs in a thread.
         """
 
         if not self._fed:
@@ -177,3 +178,5 @@ class WakeWord:
         self._best_peak = 0
         self._buffer.clear()
         self._recent.clear()
+        if self._forget_model is not None:
+            self._forget_model()

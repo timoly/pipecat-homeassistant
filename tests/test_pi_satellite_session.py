@@ -116,13 +116,22 @@ class FakeWakeWord:
         self.resets += 1
 
 
-def _commands(*queued: str):
-    """Play back console commands, then wait like an idle keyboard."""
+def _commands(*queued: str, delay_secs: float = 0.0):
+    """Play back console commands, then wait like an idle keyboard.
+
+    ``delay_secs`` spaces out everything after the first, for cases that need a
+    conversation to actually be open for a while.
+    """
 
     pending = list(queued)
+    first = True
 
     async def next_command() -> str:
+        nonlocal first
         if pending:
+            if not first and delay_secs:
+                await asyncio.sleep(delay_secs)
+            first = False
             return pending.pop(0)
         await asyncio.Event().wait()
         return ""
@@ -262,6 +271,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         capture_gain: float = 1.0,
         wake_word_gain: float = 1.0,
         wake_chime: bool = True,
+        command_delay: float = 0.0,
     ):
         config = satellite.Config(
             url="ws://example.invalid/api/assist/esphome",
@@ -273,7 +283,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             config,
             connection,
             FakeCapture(),
-            commands=_commands(*commands),
+            commands=_commands(*commands, delay_secs=command_delay),
             wake_word=wake_word,
         )
         session.playback = FakePlayback()
@@ -382,11 +392,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         await self._run(session, connection)
 
-        # The keyboard already opened a conversation, so the detector is reset
-        # rather than fed: the assistant must not wake itself.
+        # The keyboard already opened a conversation, so nothing is fed: the
+        # assistant must not wake itself. Clearing the model is the detector
+        # task's business, once a chunk arrives after the conversation.
         self.assertEqual(connection.types(), ["wake"])
-        self.assertEqual(detector.windows_fed, 0)
-        self.assertGreater(detector.resets, 0)
+        self.assertEqual(detector.heard, [])
+        self.assertTrue(session._wake_stale)
 
     async def test_each_listener_gets_its_own_gain(self):
         connection = FakeConnection()
@@ -424,6 +435,21 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.playback.played, [])
         self.assertEqual(connection.types(), ["wake"])
+
+    async def test_the_model_is_cleared_once_a_conversation_is_over(self):
+        connection = FakeConnection()
+        detector = FakeWakeWord(windows_before_hit=1000)
+        session = self._session(
+            connection, "", "s", wake_word=detector, command_delay=0.08
+        )
+
+        await self._run(session, connection, settle=0.3)
+
+        # Otherwise the phrase that started the conversation is still in the
+        # model's window afterwards, and wakes the satellite again.
+        self.assertEqual(detector.resets, 1)
+        self.assertFalse(session._wake_stale)
+        self.assertGreater(len(detector.heard), 0)
 
     async def test_a_closed_socket_ends_the_session_instead_of_spinning(self):
         connection = FakeConnection()

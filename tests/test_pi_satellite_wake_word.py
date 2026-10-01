@@ -85,18 +85,37 @@ class WakeWordTests(unittest.TestCase):
         self.assertTrue(detector.feed(FRAME, 12.5))
         self.assertEqual(len(scorer.frames), 2)
 
-    def test_the_model_history_survives_a_conversation(self):
-        scorer = FakeScorer(0.1, 1.0)
-        detector = WakeWord(scorer, threshold=0.5)
-        detector.feed(FRAME, 0.0)
+    def test_a_phrase_cannot_wake_the_satellite_from_the_models_memory(self):
+        """Observed live: woken every seven seconds in a silent room.
 
+        The model keeps ten seconds of audio and judges the last 775 ms of it.
+        Nothing is fed while a conversation is open, so its view of the room
+        stops there — and the phrase that started the conversation was still in
+        its window afterwards.
+        """
+
+        class StickyModel:
+            """Keeps answering about the phrase it heard until told to forget."""
+
+            def __init__(self):
+                self.heard = False
+
+            def score(self, frame: bytes):
+                self.heard = self.heard or frame == FRAME
+                return [1.0 if self.heard else 0.0]
+
+            def forget(self):
+                self.heard = False
+
+        model = StickyModel()
+        detector = WakeWord(model.score, forget=model.forget, threshold=0.5)
+        self.assertTrue(detector.feed(FRAME, 0.0))
+
+        # A conversation runs, during which nothing is fed, and then ends.
         detector.reset()
 
-        # Resetting the model would set its extractor back to filling eight
-        # seconds, and that work lands on the next call — stalling the loop that
-        # drains the microphone, which then loses audio.
-        self.assertTrue(detector.feed(FRAME, 1.0))
-        self.assertEqual(len(scorer.frames), 2)
+        silence = b"\x00\x00" * 1024
+        self.assertFalse(detector.feed(silence, 10.0))
 
     def test_buffered_audio_does_not_survive_a_conversation(self):
         scorer = FakeScorer(1.0)
