@@ -23,6 +23,7 @@ import contextlib
 import logging
 import math
 import os
+import re
 import sys
 import time
 import tomllib
@@ -338,7 +339,14 @@ class AlsaPlayback:
             stderr=asyncio.subprocess.PIPE,
         )
         self._messages.clear()
-        self._drain = asyncio.create_task(_log_stderr(self._process, "aplay", self._messages))
+        self._drain = asyncio.create_task(
+            _log_stderr(
+                self._process,
+                "aplay",
+                self._messages,
+                expected=_is_silence_between_replies,
+            )
+        )
         logger.info("Playing to %s at %d Hz", self.device, OUTPUT_SAMPLE_RATE)
 
     async def write(self, audio: bytes) -> None:
@@ -397,7 +405,24 @@ class AlsaPlayback:
         self._process = None
 
 
-async def _log_stderr(process: asyncio.subprocess.Process, label: str, seen: deque) -> None:
+# aplay reports an underrun when audio arrives after a gap, and the length it
+# gives is how long that gap was. Seconds of it is the silence between replies;
+# a few tens of milliseconds is a dropout inside one, which is worth a warning.
+_UNDERRUN_MS_RE = re.compile(r"underrun.*?([0-9]+(?:\.[0-9]+)?) ms")
+
+
+def _is_silence_between_replies(message: str) -> bool:
+    match = _UNDERRUN_MS_RE.search(message)
+    return bool(match) and float(match.group(1)) > 500
+
+
+async def _log_stderr(
+    process: asyncio.subprocess.Process,
+    label: str,
+    seen: deque,
+    *,
+    expected=None,
+) -> None:
     """Report what an ALSA helper says, and keep its pipe from filling up.
 
     aplay and arecord complain about overruns and underruns on stderr. Nobody
@@ -408,8 +433,10 @@ async def _log_stderr(process: asyncio.subprocess.Process, label: str, seen: deq
 
     if process.stderr is None:
         return
-    logged_at = 0.0
-    held = 0
+    # Throttled per level, so a run of expected messages cannot swallow the one
+    # warning that matters.
+    logged_at: dict[int, float] = {}
+    held: dict[int, int] = {}
     while True:
         line = await process.stderr.readline()
         if not line:
@@ -419,12 +446,14 @@ async def _log_stderr(process: asyncio.subprocess.Process, label: str, seen: deq
             continue
         seen.append(message)
         now = time.monotonic()
-        if now - logged_at < 1.0:
-            held += 1
+        level = logging.DEBUG if expected and expected(message) else logging.WARNING
+        if now - logged_at.get(level, 0.0) < 1.0:
+            held[level] = held.get(level, 0) + 1
             continue
-        suffix = f" (and {held} more)" if held else ""
-        logger.warning("%s: %s%s", label, message, suffix)
-        logged_at, held = now, 0
+        count = held.pop(level, 0)
+        suffix = f" (and {count} more)" if count else ""
+        logger.log(level, "%s: %s%s", label, message, suffix)
+        logged_at[level] = now
 
 
 def _failure(process: asyncio.subprocess.Process | None, seen: deque) -> str:
@@ -650,7 +679,6 @@ async def run(config: Config) -> None:
     try:
         while True:
             try:
-                await capture.ensure_running()
                 async with websockets.connect(
                     config.url,
                     max_size=None,
@@ -659,13 +687,20 @@ async def run(config: Config) -> None:
                 ) as connection:
                     logger.info("Connected to %s", config.url.split("?")[0])
                     delay = RECONNECT_MIN_SECS
-                    await Session(
-                        config,
-                        connection,
-                        capture,
-                        commands=console,
-                        wake_word=wake_word,
-                    ).run()
+                    # Capture runs only while a session reads it. Started any
+                    # earlier, the pipe nobody drains fills up and arecord
+                    # overruns, losing the audio it recorded meanwhile.
+                    await capture.ensure_running()
+                    try:
+                        await Session(
+                            config,
+                            connection,
+                            capture,
+                            commands=console,
+                            wake_word=wake_word,
+                        ).run()
+                    finally:
+                        await capture.stop()
             except BaseExceptionGroup as group:
                 # The task group reports whatever ended the session; quitting
                 # from the console is a request, not a failure to retry.

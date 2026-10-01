@@ -198,6 +198,26 @@ class AlsaMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(seen), ["overrun!!! (at least 12.345 ms long)"])
         self.assertIn("overrun", satellite._failure(process, seen))
 
+    async def test_the_silence_between_replies_is_not_a_warning(self):
+        from collections import deque
+
+        gap = b"underrun!!! (at least 5250.676 ms long)\n"
+        dropout = b"underrun!!! (at least 23.400 ms long)\n"
+        process = FakeProcess([gap, dropout])
+
+        with self.assertLogs(satellite.logger, logging.DEBUG) as captured:
+            await satellite._log_stderr(
+                process,
+                "aplay",
+                deque(maxlen=5),
+                expected=satellite._is_silence_between_replies,
+            )
+
+        # Playback runs with an open device, so every gap between replies ends
+        # in an underrun. Only a short one happened inside a reply.
+        self.assertIn("DEBUG", captured.output[0])
+        self.assertIn("WARNING", captured.output[1])
+
     async def test_a_silent_helper_is_explained_by_its_exit_code(self):
         from collections import deque
 
