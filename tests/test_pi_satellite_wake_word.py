@@ -15,10 +15,11 @@ if CLIENT_ROOT.is_dir():
     sys.path.insert(0, str(CLIENT_ROOT))
 
 try:
-    from wake_word import FRAME_BYTES, WakeWord  # noqa: E402
+    from wake_word import NEAR_MISS_EVERY_SECS, FRAME_BYTES, WakeWord  # noqa: E402
 except ImportError:  # The add-on image ships the server, not the Pi client.
     WakeWord = None
     FRAME_BYTES = 2048
+    NEAR_MISS_EVERY_SECS = 20.0
 
 FRAME = b"\x10\x00" * 1024  # 64 ms at 16 kHz, one call into the detector
 HALF_FRAME = b"\x10\x00" * 512
@@ -102,6 +103,49 @@ class WakeWordTests(unittest.TestCase):
 
         self.assertFalse(detector.feed(HALF_FRAME, 1.0))
         self.assertEqual(scorer.frames, [])
+
+    def test_audio_the_model_almost_accepted_is_handed_over(self):
+        misses = []
+        detector = WakeWord(
+            FakeScorer(0.31),
+            threshold=0.5,
+            on_near_miss=lambda audio, score: misses.append((len(audio), score)),
+        )
+
+        with self.assertLogs("satellite.wake_word", "DEBUG"):
+            detector.feed(FRAME, 100.0)
+
+        # Near misses are the only cases worth a second opinion: the same audio
+        # through the model on its own says whether it was ever detectable.
+        self.assertEqual(misses, [(FRAME_BYTES, 0.31)])
+
+    def test_a_score_far_from_the_threshold_is_not_handed_over(self):
+        misses = []
+        detector = WakeWord(
+            FakeScorer(0.02),
+            threshold=0.5,
+            on_near_miss=lambda audio, score: misses.append(score),
+        )
+
+        with self.assertLogs("satellite.wake_word", "DEBUG"):
+            detector.feed(FRAME, 100.0)
+
+        self.assertEqual(misses, [])
+
+    def test_near_misses_are_not_saved_on_every_attempt(self):
+        misses = []
+        detector = WakeWord(
+            FakeScorer(0.31, 0.31, 0.31),
+            threshold=0.5,
+            on_near_miss=lambda audio, score: misses.append(score),
+        )
+
+        with self.assertLogs("satellite.wake_word", "DEBUG"):
+            detector.feed(FRAME, 100.0)
+            detector.feed(FRAME, 102.0)
+            detector.feed(FRAME, 100.0 + NEAR_MISS_EVERY_SECS + 1)
+
+        self.assertEqual(len(misses), 2)
 
     def test_resetting_an_untouched_detector_costs_nothing(self):
         forgotten = []

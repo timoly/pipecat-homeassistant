@@ -86,6 +86,27 @@ a score that falls when you raise it is clipping, not a threshold problem. Only
 once the number is right is `wake_word_threshold` worth touching: raise it if the
 satellite wakes on its own, lower it if it still misses you.
 
+The report also carries the level the detector saw, so a score can be read
+against the loudness that produced it:
+
+```
+Wake word okay_nabu: best 0.180 at peak 4212 in the last second (threshold 0.40)
+```
+
+When a phrase scores close but not close enough, set
+`wake_word_save_near_misses = true` and the audio behind each near miss is
+written to a WAV in the temporary directory, at most one every twenty seconds.
+Putting that file through the model on its own is what separates a model that
+cannot hear the phrase from a stream that reached it damaged:
+
+```bash
+.venv/bin/python -m pyopen_wakeword --model okay_nabu /tmp/wake-miss-*.wav
+```
+
+`detected` there and a miss in the stream means the problem is on the way in —
+look for `overrun` in the log. `not-detected` both ways means the model needs the
+phrase said differently, or a longer one trained for it.
+
 To check the model and the microphone without this client in the way, record
 yourself and run pyopen-wakeword's own command over the file:
 

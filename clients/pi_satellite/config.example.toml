@@ -54,3 +54,9 @@ wake_word_gain = 1.0
 wake_word_threshold = 0.5
 # Seconds of deafness after a detection, so one word cannot wake it twice.
 wake_word_cooldown_secs = 2.0
+# For debugging a wake word that misses: with log_level = "DEBUG" as well, audio
+# the model almost accepted is written to a WAV in the temporary directory, at
+# most one every twenty seconds. Running the same file through the model on its
+# own says whether the phrase was ever detectable:
+#   python -m pyopen_wakeword --model okay_nabu /tmp/wake-miss-*.wav
+wake_word_save_near_misses = false

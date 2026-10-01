@@ -25,7 +25,9 @@ import math
 import os
 import re
 import sys
+import wave
 import time
+import tempfile
 import tomllib
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -96,6 +98,7 @@ class Config:
     wake_word_gain: float = 1.0
     wake_word_threshold: float = 0.5
     wake_word_cooldown_secs: float = 2.0
+    wake_word_save_near_misses: bool = False
     log_level: str = "INFO"
 
     @classmethod
@@ -131,6 +134,7 @@ class Config:
             wake_word_gain=float(values.get("wake_word_gain", 1.0)),
             wake_word_threshold=float(values.get("wake_word_threshold", 0.5)),
             wake_word_cooldown_secs=float(values.get("wake_word_cooldown_secs", 2.0)),
+            wake_word_save_near_misses=bool(values.get("wake_word_save_near_misses", False)),
             log_level=str(values.get("log_level", "INFO")).upper(),
         )
 
@@ -640,6 +644,28 @@ class ConsoleCommands:
         self._queue.put_nowait(line)
 
 
+def _save_near_miss(audio: bytes, score: float) -> None:
+    """Keep audio the wake word almost accepted, for a second opinion.
+
+    Running the same file through the model on its own is what separates a model
+    that cannot hear the phrase from a stream that reached it damaged:
+
+        python -m pyopen_wakeword --model okay_nabu /tmp/wake-miss-*.wav
+    """
+
+    path = Path(tempfile.gettempdir()) / f"wake-miss-{int(time.time())}.wav"
+    try:
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(INPUT_SAMPLE_RATE)
+            handle.writeframes(audio)
+    except OSError as error:
+        logger.warning("Could not save the near miss: %s", error)
+        return
+    logger.info("Wake word near miss %.3f saved to %s", score, path)
+
+
 def _wake_word(config: Config) -> WakeWord | None:
     """Load the configured wake word, or fail with the reason it could not be."""
 
@@ -675,6 +701,7 @@ def _wake_word(config: Config) -> WakeWord | None:
         threshold=config.wake_word_threshold,
         cooldown_secs=config.wake_word_cooldown_secs,
         name=config.wake_word_model,
+        on_near_miss=_save_near_miss if config.wake_word_save_near_misses else None,
     )
 
 
