@@ -82,10 +82,20 @@ class ResilientOpenAILiveLLMService(OpenAILiveLLMService):
     Captions are also passed on a sentence at a time: gpt-live streams its
     transcript in word pieces, which the UI and the Lovelace card would
     otherwise merge as if each piece were a word.
+
+    An assistant turn is given longer to pause before it counts as finished.
+    Pipecat groups turns by transcript gaps, and 0.8 s does not clear the gaps
+    gpt-live leaves inside one answer while it thinks or runs a backend tool, so
+    one reply was reported as several: a satellite then saw its phase flap
+    between speaking and listening, opened a follow-up window mid-answer, and
+    kept a paid session alive on the far side of each one.
     """
+
+    ASSISTANT_TURN_GAP_SECS = 2.5
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._assistant_turn.gap_secs = self.ASSISTANT_TURN_GAP_SECS
         self._closing_on_request = False
         self._recovery_times: list[float] = []
         self._recovery_instruction: str | None = None

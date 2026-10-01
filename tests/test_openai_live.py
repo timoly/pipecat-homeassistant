@@ -227,6 +227,26 @@ class OpenAILiveSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm._opening_instruction, flow.greeting)
 
 
+class OpenAILiveTurnGapTests(unittest.TestCase):
+    def test_an_assistant_pause_does_not_end_its_reply(self):
+        config = default_config_from_environment()
+        llm = main._openai_live_service(
+            api_key="test-key",
+            model="gpt-live-1",
+            flow=_openai_live_flow(),
+            integration=config.integration("openai"),
+            backend_model="gpt-5.4-mini",
+        )
+
+        # Pipecat ends a turn after 0.8 s without a transcript fragment, which
+        # gpt-live exceeds while it thinks mid-answer: one reply was then
+        # reported as several, flapping a satellite's phase and opening a
+        # follow-up window — and a paid session behind it — inside an answer.
+        self.assertGreaterEqual(llm._assistant_turn.gap_secs, 2.0)
+        # A user's turn still ends promptly, so replies are not held up.
+        self.assertLessEqual(llm._user_turn.gap_secs, 1.0)
+
+
 class OpenAILiveCaptionTests(unittest.IsolatedAsyncioTestCase):
     async def test_word_pieces_are_captioned_a_sentence_at_a_time(self):
         from pipecat.frames.frames import TTSStoppedFrame, TTSTextFrame
