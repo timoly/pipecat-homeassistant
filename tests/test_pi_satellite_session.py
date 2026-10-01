@@ -385,6 +385,23 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         # arecord: a pipe nobody reads costs the audio recorded meanwhile.
         self.assertGreater(len(detector.heard), 1)
 
+    async def test_waiting_audio_crosses_into_the_thread_in_one_batch(self):
+        connection = FakeConnection()
+
+        class SlowWakeWord(FakeWakeWord):
+            def feed(self, audio: bytes, now: float) -> bool:
+                time.sleep(0.08)
+                return super().feed(audio, now)
+
+        detector = SlowWakeWord(windows_before_hit=1000)
+        session = self._session(connection, wake_word=detector)
+
+        await self._run(session, connection, settle=0.3)
+
+        # One hop per 20 ms chunk outran real time on a Pi 3, filled the queue
+        # and lost audio. Whatever is waiting goes over together instead.
+        self.assertTrue(any(len(audio) > len(CHUNK) for audio in detector.heard))
+
     async def test_the_wake_word_is_not_listened_for_during_a_conversation(self):
         connection = FakeConnection()
         detector = FakeWakeWord(windows_before_hit=2)

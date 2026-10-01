@@ -520,6 +520,8 @@ class Session:
         # nobody drains its pipe, and a phrase with a hole in it is not heard.
         self._wake_audio: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
         self._wake_stale = False
+        self._dropped = 0
+        self._dropped_at = 0.0
         self._send_lock = asyncio.Lock()
 
     async def run(self) -> None:
@@ -605,20 +607,42 @@ class Session:
             try:
                 self._wake_audio.put_nowait(amplified(chunk, wake_gain))
             except asyncio.QueueFull:
-                # Dropping a chunk for the detector beats holding up the read.
-                logger.debug("Wake word is behind; dropped a chunk")
+                # Dropping a chunk for the detector beats holding up the read,
+                # but a phrase with a hole in it is not heard, so this is worth
+                # knowing about rather than hiding.
+                self._dropped += 1
 
     async def _detect_wake_word(self) -> None:
-        """Run the detector off the event loop, in a thread of its own."""
+        """Run the detector off the event loop, in a thread of its own.
+
+        Everything waiting goes over in one batch. One hop per 20 ms chunk is
+        fifty a second, and the cost of the hops alone outran real time on a
+        Pi 3: the queue filled, chunks were dropped, and a phrase with a hole in
+        it scored nothing while the same phrase intact scored 0.9.
+        """
 
         while True:
-            chunk = await self._wake_audio.get()
+            batch = [await self._wake_audio.get()]
+            while True:
+                try:
+                    batch.append(self._wake_audio.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
             if self._wake_stale:
                 self._wake_stale = False
                 await asyncio.to_thread(self.wake_word.reset)
-            heard = await asyncio.to_thread(self.wake_word.feed, chunk, time.monotonic())
-            if heard:
+            now = time.monotonic()
+            self._report_drops(now)
+            if await asyncio.to_thread(self.wake_word.feed, b"".join(batch), now):
                 await self._wake(time.monotonic())
+
+    def _report_drops(self, now: float) -> None:
+        if not self._dropped or now - self._dropped_at < 5.0:
+            return
+        logger.warning(
+            "Wake word fell behind and lost %d chunks of audio", self._dropped
+        )
+        self._dropped, self._dropped_at = 0, now
 
     async def _tick(self) -> None:
         while True:
