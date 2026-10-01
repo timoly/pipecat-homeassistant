@@ -304,9 +304,14 @@ class VaPipecatProtocol:
             "bot-llm-text",
         }:
             text = str(data.get("text") or "").strip()
+            # Two renderings of the same reply arrive: the spoken one, which a
+            # live model streams as transcript fragments with its own spacing
+            # ("Lyhy esti", "190-luvulla"), and the written one its backend
+            # composes a sentence at a time ("Lyhyesti", "1900-luvulla"). The
+            # written one is what a caption should show.
             priority = {
-                "bot-output": 4,
-                "bot-transcription": 3,
+                "bot-transcription": 4,
+                "bot-output": 3,
                 "bot-tts-text": 2,
                 "bot-llm-text": 1,
             }[message_type]
@@ -314,6 +319,12 @@ class VaPipecatProtocol:
                 return None
             if self.assistant_segments and self.assistant_segments[-1] == text:
                 return None
+            if priority > self.assistant_priority:
+                # A better rendering replaces what a worse one accumulated.
+                # Appending showed the same sentence twice, once garbled.
+                self.assistant_segments.clear()
+                self.assistant_text = ""
+                self.assistant_emitted_text = ""
             self.assistant_priority = max(self.assistant_priority, priority)
             self.assistant_segments.append(text)
             self.assistant_text = _merge_stream_text(self.assistant_text, text)

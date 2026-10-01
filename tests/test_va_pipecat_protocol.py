@@ -91,6 +91,36 @@ class VaPipecatProtocolTests(unittest.TestCase):
         self.assertIsNone(duplicate)
         self.assertEqual(self.protocol.assistant_segments, ["Dzie\u0144 dobry."])
 
+    def test_the_written_reply_replaces_the_spoken_transcript_of_it(self):
+        """Observed on a satellite answering "kerro Espoon historiasta".
+
+        A live model streams the spoken transcript in fragments with its own
+        spacing, and its backend composes the same answer in writing a sentence
+        at a time. Appending the second to the first showed the sentence twice,
+        once garbled.
+        """
+
+        spoken = "Lyhy esti Espoo kasvoi keskia ikais esta pitäjä stä 190-luv ulla."
+        written = "Lyhyesti Espoo kasvoi keskiaikaisesta pitäjästä 1900-luvulla."
+
+        self.protocol.on_rtvi_message(self.rtvi("bot-tts-text", {"text": spoken}))
+        self.protocol.on_rtvi_message(self.rtvi("bot-transcription", {"text": written}))
+        self.protocol.on_rtvi_message(
+            self.rtvi("bot-transcription", {"text": "Haluatko aikajanan?"})
+        )
+
+        self.assertEqual(self.protocol.assistant_text, f"{written} Haluatko aikajanan?")
+
+    def test_the_spoken_transcript_cannot_replace_the_written_reply(self):
+        written = "Lyhyesti Espoo kasvoi keskiaikaisesta pitäjästä 1900-luvulla."
+
+        self.protocol.on_rtvi_message(self.rtvi("bot-transcription", {"text": written}))
+        self.protocol.on_rtvi_message(
+            self.rtvi("bot-tts-text", {"text": "Lyhy esti Espoo kasvoi 190-luv ulla."})
+        )
+
+        self.assertEqual(self.protocol.assistant_text, written)
+
     def test_assistant_word_stream_is_emitted_as_a_cumulative_phrase(self):
         words = ["To", "jest", "odpowied\u017a", "wysy\u0142ana", "pe\u0142nymi", "frazami"]
         for word in words[:-1]:
